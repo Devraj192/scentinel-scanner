@@ -74,6 +74,7 @@ pub async fn discover_one(
             latency_ms()
         },
         ports: Vec::new(),
+        os: None,
     }
 }
 

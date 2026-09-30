@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::detection::service::Evidence;
 use crate::errors::Error;
+use crate::os::OsGuess;
 use crate::results::model::{Banner, HostResult, HostStatus, PortResult, PortState, Scan};
 use crate::scanner::resolve::ResolvedHost;
 
@@ -13,7 +14,7 @@ pub fn default_db_path() -> PathBuf {
     PathBuf::from(".sentinelscan/history.db")
 }
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -56,6 +57,13 @@ CREATE TABLE IF NOT EXISTS ports (
     banner_truncated INTEGER,
     PRIMARY KEY (scan_id, address, port)
 );
+";
+
+const MIGRATION_V2: &str = "
+ALTER TABLE hosts ADD COLUMN os_family TEXT;
+ALTER TABLE hosts ADD COLUMN os_version TEXT;
+ALTER TABLE hosts ADD COLUMN os_confidence REAL;
+ALTER TABLE hosts ADD COLUMN os_evidence_json TEXT NOT NULL DEFAULT '[]';
 ";
 
 /// Scan row plus the scope needed to resume it.
@@ -202,21 +210,44 @@ impl Storage {
         Ok(())
     }
 
-    /// Record host liveness for the scan.
+    /// Record host liveness (and any OS estimate) for the scan.
     pub fn save_host(
         &self,
         scan_id: &str,
         address: &str,
         status: HostStatus,
         latency_ms: u64,
+        os: Option<&OsGuess>,
     ) -> Result<(), Error> {
         let conn = self.connect()?;
+        let (family, version, confidence, evidence) = match os {
+            Some(os) => (
+                Some(os.family.clone()),
+                os.version.clone(),
+                Some(f64::from(os.confidence)),
+                serde_json::to_string(&os.evidence).unwrap_or_else(|_| "[]".to_owned()),
+            ),
+            None => (None, None, None, "[]".to_owned()),
+        };
         conn.execute(
-            "INSERT INTO hosts (scan_id, address, status, latency_ms)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO hosts (scan_id, address, status, latency_ms,
+               os_family, os_version, os_confidence, os_evidence_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT (scan_id, address) DO UPDATE SET
-               status = excluded.status, latency_ms = excluded.latency_ms",
-            params![scan_id, address, status.to_string(), latency_ms as i64],
+               status = excluded.status, latency_ms = excluded.latency_ms,
+               os_family = excluded.os_family, os_version = excluded.os_version,
+               os_confidence = excluded.os_confidence,
+               os_evidence_json = excluded.os_evidence_json",
+            params![
+                scan_id,
+                address,
+                status.to_string(),
+                latency_ms as i64,
+                family,
+                version,
+                confidence,
+                evidence,
+            ],
         )
         .map_err(|e| Error::Storage(format!("save_host: {e}")))?;
         Ok(())
@@ -320,7 +351,10 @@ impl Storage {
     pub fn host_rows(&self, scan_id: &str) -> Result<Vec<HostRow>, Error> {
         let conn = self.connect()?;
         let mut stmt = conn
-            .prepare("SELECT address, status, latency_ms FROM hosts WHERE scan_id = ?1")
+            .prepare(
+                "SELECT address, status, latency_ms, os_family, os_version,
+                   os_confidence, os_evidence_json FROM hosts WHERE scan_id = ?1",
+            )
             .map_err(|e| Error::Storage(format!("host_rows: {e}")))?;
         let rows = stmt
             .query_map([scan_id], |row| {
@@ -328,6 +362,10 @@ impl Storage {
                     address: row.get(0)?,
                     status: row.get(1)?,
                     latency_ms: row.get::<_, i64>(2)? as u64,
+                    os_family: row.get(3)?,
+                    os_version: row.get(4)?,
+                    os_confidence: row.get::<_, Option<f64>>(5)?,
+                    os_evidence_json: row.get(6)?,
                 })
             })
             .map_err(|e| Error::Storage(format!("host_rows: {e}")))?;
@@ -352,11 +390,13 @@ impl Storage {
             .map_err(|e| Error::Storage(format!("load_full_scan: {e}")))?;
         let mut hosts: Vec<HostResult> = Vec::new();
         for host in self.host_rows(scan_id)? {
+            let os = decode_os(&host);
             hosts.push(HostResult {
                 address: host.address,
                 status: parse_status(&host.status)?,
                 latency_ms: host.latency_ms,
                 ports: Vec::new(),
+                os,
             });
         }
         for saved in self.port_rows(scan_id)? {
@@ -369,6 +409,7 @@ impl Storage {
                     status: HostStatus::Unknown,
                     latency_ms: 0,
                     ports: vec![port],
+                    os: None,
                 }),
             }
         }
@@ -469,6 +510,10 @@ pub struct HostRow {
     pub address: String,
     pub status: String,
     pub latency_ms: u64,
+    pub os_family: Option<String>,
+    pub os_version: Option<String>,
+    pub os_confidence: Option<f64>,
+    pub os_evidence_json: String,
 }
 
 fn parse_state(text: &str) -> Result<PortState, Error> {
@@ -488,6 +533,17 @@ fn parse_status(text: &str) -> Result<HostStatus, Error> {
         "unknown" => Ok(HostStatus::Unknown),
         other => Err(Error::Storage(format!("corrupt host status '{other}'"))),
     }
+}
+
+fn decode_os(host: &HostRow) -> Option<OsGuess> {
+    let family = host.os_family.clone()?;
+    let evidence: Vec<Evidence> = serde_json::from_str(&host.os_evidence_json).unwrap_or_default();
+    Some(OsGuess {
+        family,
+        version: host.os_version.clone(),
+        confidence: host.os_confidence.unwrap_or(0.0) as f32,
+        evidence,
+    })
 }
 
 fn decode_port_row(row: &PortRow) -> Result<PortResult, Error> {
@@ -522,21 +578,43 @@ fn unix_now() -> u64 {
 fn migrate(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(MIGRATION_V1)
         .map_err(|e| Error::Storage(format!("migrate: {e}")))?;
+    record_version(conn, 1)?;
+    if column_missing(conn, "hosts", "os_family")? {
+        conn.execute_batch(MIGRATION_V2)
+            .map_err(|e| Error::Storage(format!("migrate: {e}")))?;
+    }
+    record_version(conn, SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn record_version(conn: &Connection, version: i64) -> Result<(), Error> {
     let applied: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-            [SCHEMA_VERSION],
+            [version],
             |row| row.get(0),
         )
         .map_err(|e| Error::Storage(format!("migrate: {e}")))?;
     if applied == 0 {
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_unix_secs) VALUES (?1, ?2)",
-            params![SCHEMA_VERSION, unix_now() as i64],
+            params![version, unix_now() as i64],
         )
         .map_err(|e| Error::Storage(format!("migrate: {e}")))?;
     }
     Ok(())
+}
+
+/// True when a migration adding `column` has not run yet. Newer code opening
+/// an older database upgrades it in place.
+fn column_missing(conn: &Connection, table: &str, column: &str) -> Result<bool, Error> {
+    let mut stmt = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2")
+        .map_err(|e| Error::Storage(format!("migrate: {e}")))?;
+    let found: i64 = stmt
+        .query_row(params![table, column], |row| row.get(0))
+        .map_err(|e| Error::Storage(format!("migrate: {e}")))?;
+    Ok(found == 0)
 }
 
 /// Scan history maps someone's network, so it must not be world-readable.
@@ -748,6 +826,12 @@ mod tests {
                         raw: b"HTTP/1.1 200 OK".to_vec(),
                     }),
                 }],
+                os: Some(OsGuess {
+                    family: "Linux".to_owned(),
+                    version: None,
+                    confidence: 0.5,
+                    evidence: vec![Evidence::observation("unit fixture")],
+                }),
             }],
         }
     }
@@ -766,6 +850,7 @@ mod tests {
                     &host.address,
                     host.status,
                     host.latency_ms,
+                    host.os.as_ref(),
                 )
                 .expect("host");
             for port in &host.ports {
@@ -816,6 +901,43 @@ mod tests {
     }
 
     #[test]
+    fn v1_database_upgrades_to_v2() {
+        let path = std::env::temp_dir().join(format!(
+            "sentinelscan-v1-{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        {
+            let conn = rusqlite::Connection::open(&path).expect("create v1");
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_unix_secs INTEGER NOT NULL);
+                 INSERT INTO schema_migrations VALUES (1, 1);
+                 CREATE TABLE scans (scan_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'running',
+                   started_unix_secs INTEGER NOT NULL, finished_unix_secs INTEGER NOT NULL DEFAULT 0,
+                   truncated INTEGER NOT NULL DEFAULT 0, peak_active_probes INTEGER NOT NULL DEFAULT 0,
+                   targets_json TEXT NOT NULL DEFAULT '[]', ports_json TEXT NOT NULL DEFAULT '[]',
+                   resolved_json TEXT NOT NULL DEFAULT '[]', version TEXT NOT NULL DEFAULT '');
+                 CREATE TABLE hosts (scan_id TEXT NOT NULL, address TEXT NOT NULL, status TEXT NOT NULL,
+                   latency_ms INTEGER NOT NULL, PRIMARY KEY (scan_id, address));
+                 CREATE TABLE ports (scan_id TEXT NOT NULL, address TEXT NOT NULL, port INTEGER NOT NULL,
+                   protocol TEXT NOT NULL DEFAULT 'tcp', state TEXT NOT NULL, reason TEXT NOT NULL,
+                   latency_ms INTEGER NOT NULL, service TEXT, version TEXT, confidence REAL,
+                   evidence_json TEXT NOT NULL DEFAULT '[]', banner_text TEXT, banner_encoding TEXT,
+                   banner_truncated INTEGER, PRIMARY KEY (scan_id, address, port));",
+            )
+            .expect("v1 schema");
+        }
+        let storage = Storage::open(&path).expect("upgrade");
+        storage
+            .save_host("01V1", "127.0.0.1", HostStatus::Up, 1, None)
+            .expect("os columns exist after upgrade");
+        assert_eq!(storage.host_rows("01V1").expect("read").len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn compare_finds_added_removed_changed() {
         let mut older = scan_fixture("01OLD");
         let mut newer = scan_fixture("01NEW");
@@ -849,6 +971,7 @@ mod tests {
                 evidence: Vec::new(),
                 banner: None,
             }],
+            os: None,
         });
         let diff = compare(&older, &newer);
         assert_eq!(diff.added.len(), 1);

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::detection::service::Evidence;
+use crate::os::OsGuess;
 
 /// Port state per PRD 3.3. A timeout is never `closed`; local errors are
 /// `unknown`, never a guess.
@@ -75,6 +76,9 @@ pub struct HostResult {
     pub status: HostStatus,
     pub latency_ms: u64,
     pub ports: Vec<PortResult>,
+    /// OS estimate, present only when OS detection ran.
+    #[serde(default)]
+    pub os: Option<OsGuess>,
 }
 
 /// Scan metadata. Every scan carries a unique ULID `scan_id`.
@@ -225,6 +229,28 @@ pub fn to_csv(scan: &Scan) -> String {
     }
     out
 }
+/// HOST / OS / VERSION / CONFIDENCE lines for hosts with a decided OS
+/// estimate. Empty when OS detection did not run or admitted Unknown.
+pub fn os_lines(scan: &Scan) -> String {
+    let mut out = String::new();
+    for host in &scan.hosts {
+        let Some(os) = &host.os else {
+            continue;
+        };
+        if os.family == "Unknown" {
+            continue;
+        }
+        out.push_str(&format!(
+            "os\t{}\t{}\t{}\t{:.2}\n",
+            sanitize(&host.address),
+            sanitize(&os.family),
+            sanitize(os.version.as_deref().unwrap_or("-")),
+            os.confidence,
+        ));
+    }
+    out
+}
+
 /// HOST / STATUS / LATENCY table for discovery-only output.
 pub fn host_table(hosts: &[HostResult]) -> String {
     let mut out = String::from("HOST\tSTATUS\tLATENCY_MS\n");
@@ -267,6 +293,7 @@ mod tests {
                 evidence: Vec::new(),
                 banner: None,
             }],
+            os: None,
         });
         scan.finish();
         let text = to_json(&scan);
@@ -294,6 +321,7 @@ mod tests {
                 evidence: Vec::new(),
                 banner: None,
             }],
+            os: None,
         });
         let csv = to_csv(&scan);
         assert!(csv.contains("\"a,b\""));
@@ -308,6 +336,7 @@ mod tests {
             status: HostStatus::Down,
             latency_ms: 5,
             ports: Vec::new(),
+            os: None,
         });
         let table = terminal_table(&scan);
         assert!(table.contains("127.0.0.2"));

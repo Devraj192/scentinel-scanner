@@ -77,6 +77,7 @@ struct PreparedScan {
     guard: ScopeGuard,
     skip_discovery: bool,
     detect: bool,
+    os_enabled: bool,
     storage: Storage,
 }
 
@@ -88,6 +89,7 @@ struct PrepareRequest {
     profile: Profile,
     service_detection: bool,
     banner: bool,
+    os_detection: bool,
     skip_discovery: bool,
     output: String,
     concurrency: Option<usize>,
@@ -190,6 +192,11 @@ fn prepare(request: &PrepareRequest) -> anyhow::Result<Option<PreparedScan>> {
         .clone()
         .map_or_else(default_db_path, std::path::PathBuf::from);
     let storage = Storage::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+    // OS estimates ride on detected services: Standard wires them up, Quick
+    // leaves them off unless explicitly requested. Requesting OS detection
+    // implies service detection, which supplies the signals.
+    let os_enabled = request.os_detection || request.profile == Profile::Standard;
+    let detect = settings.detect || request.os_detection;
     Ok(Some(PreparedScan {
         scan_id,
         config,
@@ -197,7 +204,8 @@ fn prepare(request: &PrepareRequest) -> anyhow::Result<Option<PreparedScan>> {
         targets,
         guard,
         skip_discovery: settings.skip_discovery,
-        detect: settings.detect,
+        detect,
+        os_enabled,
         storage,
     }))
 }
@@ -281,6 +289,7 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
                         status: HostStatus::Unknown,
                         latency_ms: 0,
                         ports: Vec::new(),
+                        os: None,
                     });
                     scannable.push(ip);
                 }
@@ -289,6 +298,7 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
                     status: HostStatus::Unknown,
                     latency_ms: 0,
                     ports: Vec::new(),
+                    os: None,
                 }),
             }
         }
@@ -306,6 +316,7 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
                     status: HostStatus::Unknown,
                     latency_ms: 0,
                     ports: Vec::new(),
+                    os: None,
                 }),
             }
         }
@@ -393,19 +404,35 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
                 status: HostStatus::Unknown,
                 latency_ms: 0,
                 ports: vec![saved.clone()],
+                os: None,
             }),
         }
     }
     for host in &mut hosts {
         host.ports.sort_by_key(|port| port.port);
-        prepared
-            .storage
-            .save_host(&scan_id, &host.address, host.status, host.latency_ms)
-            .map_err(|e| anyhow!("{e}"))?;
     }
     scan.hosts = hosts;
     if prepared.detect {
         identify_services(&mut scan, prepared, &scan_id, &semaphore, &rate).await;
+    }
+    // OS estimates need detected services; without them every guess would be
+    // Unknown noise, so skip the stage entirely.
+    if prepared.os_enabled && prepared.detect {
+        for host in &mut scan.hosts {
+            host.os = Some(crate::os::fingerprint(&host.ports));
+        }
+    }
+    for host in &scan.hosts {
+        prepared
+            .storage
+            .save_host(
+                &scan_id,
+                &host.address,
+                host.status,
+                host.latency_ms,
+                host.os.as_ref(),
+            )
+            .map_err(|e| anyhow!("{e}"))?;
     }
     scan.finish();
     tracing::info!(scan_id = %scan.meta.scan_id, event = "scan_completed");
@@ -484,6 +511,7 @@ fn emit(scan: &Scan, output: &str) {
         "csv" => print!("{}", model::to_csv(scan)),
         _ => {
             print!("{}", model::terminal_table(scan));
+            print!("{}", model::os_lines(scan));
             if scan.meta.truncated {
                 println!("Note: scan stopped early; results are partial.");
             }
@@ -509,9 +537,6 @@ fn maybe_finish(prepared: &PreparedScan, scan: &Scan) -> anyhow::Result<()> {
 
 /// Run the `scan` subcommand end to end.
 pub async fn run_scan(args: &ScanArgs) -> anyhow::Result<()> {
-    if args.os_detection {
-        eprintln!("Note: OS detection arrives in Phase 5; continuing without it.");
-    }
     if let Some(resume_id) = &args.resume {
         return run_resume(args, resume_id).await;
     }
@@ -525,6 +550,7 @@ pub async fn run_scan(args: &ScanArgs) -> anyhow::Result<()> {
         profile: args.profile,
         service_detection: args.service_detection,
         banner: args.banner,
+        os_detection: args.os_detection,
         skip_discovery: args.skip_host_discovery,
         output: args.output.clone(),
         concurrency: args.concurrency,
@@ -595,7 +621,8 @@ async fn run_resume(args: &ScanArgs, resume_id: &str) -> anyhow::Result<()> {
         targets,
         guard,
         skip_discovery: settings.skip_discovery,
-        detect: settings.detect,
+        detect: settings.detect || args.os_detection,
+        os_enabled: args.os_detection || args.profile == Profile::Standard,
         storage,
     };
     let scan = run_bounded(&prepared, Some(&stored)).await?;
@@ -622,6 +649,7 @@ async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result
         profile: Profile::Standard,
         service_detection: matches!(mode, TargetMode::Services),
         banner: false,
+        os_detection: false,
         skip_discovery: false,
         output: "terminal".to_owned(),
         concurrency: None,
@@ -662,6 +690,7 @@ async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result
     maybe_finish(&prepared, &scan)?;
     if matches!(mode, TargetMode::Services) {
         print!("{}", model::service_table(&scan));
+        print!("{}", model::os_lines(&scan));
     } else {
         emit(&scan, "terminal");
     }
@@ -727,7 +756,7 @@ pub async fn run(command: &Command) -> anyhow::Result<()> {
         Command::Scan(args) => run_scan(args).await,
         Command::Config(args) => {
             let config = Config::load(args.config.as_deref()).map_err(|e| anyhow!("{e}"))?;
-            println!("{}", toml::to_string(&config.limits).unwrap_or_default());
+            println!("{}", toml::to_string(&config).unwrap_or_default());
             Ok(())
         }
         Command::Hosts(arg) => run_target_command(arg, TargetMode::Hosts).await,

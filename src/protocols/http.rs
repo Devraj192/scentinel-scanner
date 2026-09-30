@@ -36,12 +36,14 @@ fn parse_response(head: &[u8]) -> Option<(Option<String>, bool)> {
 
 fn http_detection(head: &[u8]) -> Option<Detection> {
     let (server, _) = parse_response(head)?;
-    let status_line = std::str::from_utf8(head)
+    let status_line: String = std::str::from_utf8(head)
         .ok()?
         .lines()
         .next()
         .unwrap_or("")
-        .to_owned();
+        .chars()
+        .take(256)
+        .collect();
     let mut evidence = vec![Evidence::observation(&format!("status: {status_line}"))];
     let (version, confidence) = match server {
         Some(server) => {

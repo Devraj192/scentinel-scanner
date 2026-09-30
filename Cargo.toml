@@ -1,8 +1,8 @@
 [package]
 name = "sentinelscan"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
-description = "Authorized-only network discovery and TCP port scanner (Phase 1: parsing + safety, no traffic)"
+description = "Authorized-only network discovery and TCP port scanner"
 license = "MIT"
 
 [[bin]]
@@ -26,3 +26,10 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid = "1.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "scan"
+harness = false
