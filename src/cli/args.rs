@@ -79,6 +79,12 @@ pub struct ScanArgs {
 pub struct TargetArg {
     /// Target to operate on.
     pub target: String,
+    /// Allow hostname targets (off by default).
+    #[arg(long, default_value_t = false)]
+    pub allow_hostnames: bool,
+    /// Skip the confirmation prompt (automation).
+    #[arg(long, default_value_t = false)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Clone, Parser)]

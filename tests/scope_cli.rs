@@ -1,19 +1,48 @@
-use std::process::Command;
+use std::io::Write as _;
+use std::process::{Command, Stdio};
 
 fn binary() -> String {
     env!("CARGO_BIN_EXE_sentinelscan").to_owned()
 }
 
 #[test]
-fn scan_prints_scope_and_sends_no_traffic() {
+fn scan_prints_scope_then_results_table() {
     let output = Command::new(binary())
-        .args(["scan", "127.0.0.1", "--ports", "80", "--yes"])
+        .args([
+            "scan",
+            "127.0.0.1",
+            "--ports",
+            "80",
+            "--yes",
+            "--skip-host-discovery",
+        ])
         .output()
         .expect("run binary");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Authorized use only"), "{stdout}");
-    assert!(stdout.contains("no traffic"), "{stdout}");
+    assert!(stdout.contains("HOST"), "{stdout}");
+    assert!(stdout.contains("127.0.0.1"), "{stdout}");
+}
+
+#[test]
+fn scan_aborts_on_no() {
+    let mut child = Command::new(binary())
+        .args(["scan", "127.0.0.1", "--ports", "80"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn binary");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"n\n")
+        .expect("answer no");
+    let output = child.wait_with_output().expect("wait");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Aborted"), "{stdout}");
 }
 
 #[test]
