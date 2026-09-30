@@ -1,0 +1,15 @@
+# Build output
+/target/
+
+# Documents / planning files (local only, never pushed)
+.docs/
+.rules/
+.opencode/
+PRD.md
+AGENTS.md
+ARCHITECTURE.md
+STATE.md
+CHANGELOG.md
+DECISION.md
+README.md
+opencode.json
