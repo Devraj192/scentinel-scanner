@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -30,13 +31,15 @@ pub struct PortScan {
 }
 
 /// Bounded port scan: the semaphore caps *active* probes, the rate limiter caps
-/// *starts* per second. One failed probe never affects the others.
+/// *starts* per second. Pairs in `skip` (already saved by an interrupted run)
+/// are never probed again. One failed probe never affects the others.
 pub async fn scan_ports(
     ips: &[IpAddr],
     ports: &[u16],
     limits: &Limits,
     guard: &ScopeGuard,
     rate: Arc<RateLimiter>,
+    skip: &HashSet<(IpAddr, u16)>,
 ) -> PortScan {
     let semaphore = Arc::new(Semaphore::new(limits.max_concurrency.max(1)));
     let active = Arc::new(AtomicUsize::new(0));
@@ -47,6 +50,9 @@ pub async fn scan_ports(
     let mut spawn_cancelled = false;
     'spawn: for &ip in ips {
         for &port in ports {
+            if skip.contains(&(ip, port)) {
+                continue;
+            }
             tokio::select! {
                 biased;
                 _ = &mut stop => { spawn_cancelled = true; break 'spawn; }

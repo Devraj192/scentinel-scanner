@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -7,18 +8,20 @@ use anyhow::{anyhow, Context};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use super::args::{Command, ScanArgs, TargetArg};
+use super::args::{Command, HistoryArgs, ScanArgs, TargetArg};
+use crate::config::profiles::Profile;
 use crate::config::{Config, Limits};
 use crate::detection::identify;
 use crate::discovery::host::discover_all;
 use crate::errors::Error;
 use crate::results::model::{self, HostResult, HostStatus, PortResult, Scan};
-use crate::safety::limits::enforce_host_count;
 use crate::safety::ports::parse_ports;
 use crate::safety::scope::{host_count, parse_targets, ParsedTarget, ScopeGuard};
 use crate::scanner::rate_limit::RateLimiter;
+use crate::scanner::resolve::{resolve_targets, ResolvedHost};
 use crate::scanner::scheduler::scan_ports;
 use crate::scanner::timeout;
+use crate::storage::{compare, comparison_table, default_db_path, Comparison, Storage, StoredScan};
 
 /// Print the pre-scan scope summary and require `y` unless `--yes` was given.
 /// Machine-readable modes keep stdout pure, so the summary goes to stderr.
@@ -57,57 +60,13 @@ fn validate_output_format(output: &str) -> Result<(), Error> {
     }
 }
 
-/// One resolved scan target. `addr` is `None` when hostname resolution failed;
-/// the host is still reported (as `unknown`) so one bad target never aborts
-/// the scan.
-struct ResolvedHost {
-    display: String,
-    addr: Option<IpAddr>,
-}
-
-/// Expand parsed targets to addresses. Hostname resolution happens here, after
-/// confirmation: it is the first network I/O in the program.
-async fn resolve_targets(
-    targets: &[ParsedTarget],
-    guard: &ScopeGuard,
-    max_hosts: usize,
-) -> Result<Vec<ResolvedHost>, Error> {
-    let mut out = Vec::new();
-    for target in targets {
-        match target {
-            ParsedTarget::Ip(ip) => out.push(ResolvedHost {
-                display: ip.to_string(),
-                addr: Some(*ip),
-            }),
-            ParsedTarget::Cidr(net) => {
-                for ip in net.hosts().take(max_hosts.saturating_add(1)) {
-                    out.push(ResolvedHost {
-                        display: ip.to_string(),
-                        addr: Some(ip),
-                    });
-                }
-            }
-            ParsedTarget::Hostname(name) => {
-                guard.check_hostname(name)?;
-                match tokio::net::lookup_host((name.as_str(), 0)).await {
-                    Ok(addrs) => {
-                        for addr in addrs {
-                            out.push(ResolvedHost {
-                                display: name.clone(),
-                                addr: Some(addr.ip()),
-                            });
-                        }
-                    }
-                    Err(_) => out.push(ResolvedHost {
-                        display: name.clone(),
-                        addr: None,
-                    }),
-                }
-            }
-        }
-        enforce_host_count(out.len(), max_hosts)?;
+fn validate_machine_output(output: &str) -> Result<(), Error> {
+    match output {
+        "terminal" | "json" => Ok(()),
+        other => Err(Error::Config(format!(
+            "unknown output '{other}' (terminal|json)"
+        ))),
     }
-    Ok(out)
 }
 
 struct PreparedScan {
@@ -116,6 +75,9 @@ struct PreparedScan {
     ports: Vec<u16>,
     targets: Vec<ParsedTarget>,
     guard: ScopeGuard,
+    skip_discovery: bool,
+    detect: bool,
+    storage: Storage,
 }
 
 /// Inputs for scope preparation; grouped so the parameter list stays small.
@@ -123,12 +85,50 @@ struct PrepareRequest {
     raw_targets: Vec<String>,
     allow_hostnames: bool,
     port_spec: Option<String>,
-    profile_default_ports: String,
+    profile: Profile,
+    service_detection: bool,
+    banner: bool,
+    skip_discovery: bool,
     output: String,
     concurrency: Option<usize>,
     rate: Option<u64>,
     config_path: Option<String>,
+    db_path: Option<String>,
     yes: bool,
+}
+
+/// Effective behavior after layering explicit flags over config-file profile
+/// tables over built-in profile defaults.
+struct EffectiveSettings {
+    port_spec: String,
+    detect: bool,
+    skip_discovery: bool,
+}
+
+fn effective_settings(
+    profile: Profile,
+    config: &Config,
+    port_spec: Option<String>,
+    service_detection: bool,
+    banner: bool,
+    skip_discovery: bool,
+) -> EffectiveSettings {
+    let table = config.profiles.get(profile.section());
+    let builtin_detect = profile == Profile::Standard;
+    EffectiveSettings {
+        port_spec: port_spec
+            .or_else(|| table.and_then(|table| table.ports.clone()))
+            .unwrap_or_else(|| profile.default_ports().to_owned()),
+        detect: service_detection
+            || banner
+            || table
+                .and_then(|table| table.service_detection.or(table.banner))
+                .unwrap_or(builtin_detect),
+        skip_discovery: skip_discovery
+            || table
+                .and_then(|table| table.skip_host_discovery)
+                .unwrap_or(false),
+    }
 }
 
 /// Parse, validate, and confirm scope. No socket opens before this returns.
@@ -139,12 +139,17 @@ fn prepare(request: &PrepareRequest) -> anyhow::Result<Option<PreparedScan>> {
     validate_output_format(&request.output).map_err(|e| anyhow!("{e}"))?;
     let mut config = Config::load(request.config_path.as_deref()).map_err(|e| anyhow!("{e}"))?;
     apply_overrides(&mut config.limits, request.concurrency, request.rate)?;
+    let settings = effective_settings(
+        request.profile,
+        &config,
+        request.port_spec.clone(),
+        request.service_detection,
+        request.banner,
+        request.skip_discovery,
+    );
 
-    let port_spec = request
-        .port_spec
-        .clone()
-        .unwrap_or_else(|| request.profile_default_ports.clone());
-    let ports = parse_ports(&port_spec, config.limits.max_ports).map_err(|e| anyhow!("{e}"))?;
+    let ports =
+        parse_ports(&settings.port_spec, config.limits.max_ports).map_err(|e| anyhow!("{e}"))?;
     let targets = parse_targets(
         &request.raw_targets,
         request.allow_hostnames,
@@ -170,7 +175,7 @@ fn prepare(request: &PrepareRequest) -> anyhow::Result<Option<PreparedScan>> {
                 .join(" ")
         ),
         host_count(&targets),
-        model::sanitize(&port_spec),
+        model::sanitize(&settings.port_spec),
         ports.len(),
         config.limits.max_concurrency,
         config.limits.max_rate,
@@ -180,12 +185,20 @@ fn prepare(request: &PrepareRequest) -> anyhow::Result<Option<PreparedScan>> {
         println!("Aborted. No traffic sent.");
         return Ok(None);
     }
+    let db_path = request
+        .db_path
+        .clone()
+        .map_or_else(default_db_path, std::path::PathBuf::from);
+    let storage = Storage::open(&db_path).map_err(|e| anyhow!("{e}"))?;
     Ok(Some(PreparedScan {
         scan_id,
         config,
         ports,
         targets,
         guard,
+        skip_discovery: settings.skip_discovery,
+        detect: settings.detect,
+        storage,
     }))
 }
 
@@ -209,22 +222,48 @@ fn apply_overrides(
     Ok(())
 }
 
-/// Discover hosts then scan ports on everything not `down`. When `detect` is
-/// set, only open ports reach service detection, one detector at a time.
-async fn run_phases(
-    prepared: &PreparedScan,
-    skip_discovery: bool,
-    detect: bool,
-) -> anyhow::Result<Scan> {
-    let target_names: Vec<String> = prepared.targets.iter().map(ToString::to_string).collect();
-    let mut scan = Scan::start(prepared.scan_id.clone(), target_names);
-    let resolved = resolve_targets(
-        &prepared.targets,
-        &prepared.guard,
-        prepared.config.limits.max_hosts,
-    )
-    .await
-    .map_err(|e| anyhow!("{e}"))?;
+/// Discover hosts, scan ports on everything not `down`, and persist progress
+/// after every stage so an interrupted scan stays resumable. When `resume` is
+/// set, already-saved probes are reused, never rescanned.
+async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> anyhow::Result<Scan> {
+    let scan_id = resume.map_or(prepared.scan_id.clone(), |stored| stored.scan_id.clone());
+    let ports = resume.map_or(prepared.ports.clone(), |stored| stored.ports.clone());
+    let target_names: Vec<String> = resume.map_or_else(
+        || prepared.targets.iter().map(ToString::to_string).collect(),
+        |stored| stored.targets.clone(),
+    );
+    let mut scan = Scan::start(scan_id.clone(), target_names);
+    let resolved: Vec<ResolvedHost> = match resume {
+        Some(stored) => stored.resolved.clone(),
+        None => resolve_targets(
+            &prepared.targets,
+            &prepared.guard,
+            prepared.config.limits.max_hosts,
+        )
+        .await
+        .map_err(|e| anyhow!("{e}"))?,
+    };
+    if resume.is_none() {
+        prepared
+            .storage
+            .begin_scan(&scan_id, &scan.targets, &ports, &resolved)
+            .map_err(|e| anyhow!("{e}"))?;
+    }
+    let mut completed: HashMap<(String, u16), PortResult> = HashMap::new();
+    if resume.is_some() {
+        for saved in prepared
+            .storage
+            .port_rows(&scan_id)
+            .map_err(|e| anyhow!("{e}"))?
+        {
+            completed.insert((saved.address.clone(), saved.port.port), saved.port);
+        }
+    }
+    // Pairs an interrupted run already saved are never probed again.
+    let skip: HashSet<(IpAddr, u16)> = completed
+        .keys()
+        .filter_map(|(address, port)| address.parse().ok().map(|ip| (ip, *port)))
+        .collect();
 
     let semaphore = Arc::new(Semaphore::new(
         prepared.config.limits.max_concurrency.max(1),
@@ -233,7 +272,7 @@ async fn run_phases(
 
     let mut hosts: Vec<HostResult> = Vec::new();
     let mut scannable: Vec<IpAddr> = Vec::new();
-    if skip_discovery {
+    if prepared.skip_discovery {
         for host in &resolved {
             match host.addr {
                 Some(ip) => {
@@ -272,7 +311,7 @@ async fn run_phases(
         }
         let (mut discovered, discovery_cancelled) = discover_all(
             &pending,
-            &prepared.ports,
+            &ports,
             &prepared.config.limits,
             &prepared.guard,
             Arc::clone(&semaphore),
@@ -300,13 +339,13 @@ async fn run_phases(
             hosts.push(host);
         }
     }
-
     let port_scan = scan_ports(
         &scannable,
-        &prepared.ports,
+        &ports,
         &prepared.config.limits,
         &prepared.guard,
         Arc::clone(&rate),
+        &skip,
     )
     .await;
     if port_scan.cancelled || port_scan.join_errors > 0 {
@@ -315,6 +354,17 @@ async fn run_phases(
     scan.meta.peak_active_probes = port_scan.peak_active;
     for probe in port_scan.probes {
         let address = probe.ip.to_string();
+        prepared
+            .storage
+            .save_probe(
+                &scan_id,
+                &address,
+                probe.port,
+                probe.outcome.state,
+                probe.outcome.reason,
+                probe.outcome.latency_ms,
+            )
+            .map_err(|e| anyhow!("{e}"))?;
         if let Some(host) = hosts.iter_mut().find(|host| host.address == address) {
             host.ports.push(PortResult {
                 port: probe.port,
@@ -330,28 +380,47 @@ async fn run_phases(
             });
         }
     }
+    // Reattach previously saved probes (resume path).
+    for ((address, _), saved) in &completed {
+        match hosts.iter_mut().find(|host| &host.address == address) {
+            Some(host) => {
+                if !host.ports.iter().any(|port| port.port == saved.port) {
+                    host.ports.push(saved.clone());
+                }
+            }
+            None => hosts.push(HostResult {
+                address: address.clone(),
+                status: HostStatus::Unknown,
+                latency_ms: 0,
+                ports: vec![saved.clone()],
+            }),
+        }
+    }
+    for host in &mut hosts {
+        host.ports.sort_by_key(|port| port.port);
+        prepared
+            .storage
+            .save_host(&scan_id, &host.address, host.status, host.latency_ms)
+            .map_err(|e| anyhow!("{e}"))?;
+    }
     scan.hosts = hosts;
-    if detect {
-        identify_services(
-            &mut scan,
-            prepared,
-            Arc::clone(&semaphore),
-            Arc::clone(&rate),
-        )
-        .await;
+    if prepared.detect {
+        identify_services(&mut scan, prepared, &scan_id, &semaphore, &rate).await;
     }
     scan.finish();
     tracing::info!(scan_id = %scan.meta.scan_id, event = "scan_completed");
     Ok(scan)
 }
 
-/// Run service detection on open ports only. Probe latency and state stay as
-/// the port scan measured them; detection fills service fields and banners.
+/// Run service detection on open ports lacking service data. Probe latency and
+/// state stay as the port scan measured them; detection fills service fields
+/// and banners, persisting each result as it completes.
 async fn identify_services(
     scan: &mut Scan,
     prepared: &PreparedScan,
-    semaphore: Arc<Semaphore>,
-    rate: Arc<RateLimiter>,
+    scan_id: &str,
+    semaphore: &Arc<Semaphore>,
+    rate: &Arc<RateLimiter>,
 ) {
     let mut set = JoinSet::new();
     for (host_index, host) in scan.hosts.iter().enumerate() {
@@ -359,11 +428,11 @@ async fn identify_services(
             continue;
         };
         for (port_index, port) in host.ports.iter().enumerate() {
-            if port.state != crate::results::model::PortState::Open {
+            if port.state != crate::results::model::PortState::Open || port.service.is_some() {
                 continue;
             }
-            let semaphore = Arc::clone(&semaphore);
-            let rate = Arc::clone(&rate);
+            let semaphore = Arc::clone(semaphore);
+            let rate = Arc::clone(rate);
             let limits = prepared.config.limits.clone();
             let guard = prepared.guard.clone();
             let port_number = port.port;
@@ -378,6 +447,9 @@ async fn identify_services(
         scan.meta.truncated = true;
     }
     for (host_index, port_index, detected) in done {
+        let Some(address) = scan.hosts.get(host_index).map(|host| host.address.clone()) else {
+            continue;
+        };
         let Some(port) = scan
             .hosts
             .get_mut(host_index)
@@ -390,17 +462,17 @@ async fn identify_services(
         port.confidence = detected.confidence;
         port.evidence = detected.evidence;
         port.banner = detected.banner;
+        if let Err(e) = prepared.storage.update_detection(scan_id, &address, port) {
+            tracing::warn!(%e, "detection result not persisted");
+        }
     }
 }
+use std::path::PathBuf;
 
 /// Bound the whole scan (discovery plus ports) by `max_scan_duration_secs`.
-async fn run_bounded(
-    prepared: &PreparedScan,
-    skip_discovery: bool,
-    detect: bool,
-) -> anyhow::Result<Scan> {
+async fn run_bounded(prepared: &PreparedScan, resume: Option<&StoredScan>) -> anyhow::Result<Scan> {
     let duration = Duration::from_secs(prepared.config.limits.max_scan_duration_secs.max(1));
-    match tokio::time::timeout(duration, run_phases(prepared, skip_discovery, detect)).await {
+    match tokio::time::timeout(duration, run_phases(prepared, resume)).await {
         Ok(scan) => scan,
         Err(_) => Err(anyhow!("scan duration exceeded max_scan_duration_secs")),
     }
@@ -419,30 +491,115 @@ fn emit(scan: &Scan, output: &str) {
     }
 }
 
-/// Run the `scan` subcommand end to end. The Standard profile enables service
-/// detection and banners; Quick leaves them off unless explicitly requested.
+/// Persist a cleanly finished scan. Interrupted scans stay `running` so
+/// `--resume` can pick them up.
+fn maybe_finish(prepared: &PreparedScan, scan: &Scan) -> anyhow::Result<()> {
+    if scan.meta.truncated {
+        eprintln!(
+            "Scan {} stopped early; resume it with: sentinelscan scan --resume {} --yes",
+            scan.meta.scan_id, scan.meta.scan_id
+        );
+        return Ok(());
+    }
+    prepared
+        .storage
+        .finish_scan(&scan.meta.scan_id, false, scan.meta.peak_active_probes)
+        .map_err(|e| anyhow!("{e}"))
+}
+
+/// Run the `scan` subcommand end to end.
 pub async fn run_scan(args: &ScanArgs) -> anyhow::Result<()> {
     if args.os_detection {
         eprintln!("Note: OS detection arrives in Phase 5; continuing without it.");
     }
-    let detect = args.service_detection
-        || args.banner
-        || args.profile == crate::config::profiles::Profile::Standard;
+    if let Some(resume_id) = &args.resume {
+        return run_resume(args, resume_id).await;
+    }
+    if args.targets.is_empty() {
+        return Err(anyhow!("no targets given"));
+    }
     let Some(prepared) = prepare(&PrepareRequest {
         raw_targets: args.targets.clone(),
         allow_hostnames: args.allow_hostnames,
         port_spec: args.ports.clone(),
-        profile_default_ports: args.profile.default_ports().to_owned(),
+        profile: args.profile,
+        service_detection: args.service_detection,
+        banner: args.banner,
+        skip_discovery: args.skip_host_discovery,
         output: args.output.clone(),
         concurrency: args.concurrency,
         rate: args.rate,
         config_path: args.config.clone(),
+        db_path: args.db.clone(),
         yes: args.yes,
     })?
     else {
         return Ok(());
     };
-    let scan = run_bounded(&prepared, args.skip_host_discovery, detect).await?;
+    let scan = run_bounded(&prepared, None).await?;
+    maybe_finish(&prepared, &scan)?;
+    emit(&scan, &args.output);
+    Ok(())
+}
+
+/// Resume an interrupted scan: reuse its stored scope and saved probes, probe
+/// only what is missing. Targets and ports cannot be combined with `--resume`.
+async fn run_resume(args: &ScanArgs, resume_id: &str) -> anyhow::Result<()> {
+    if !args.targets.is_empty() || args.ports.is_some() {
+        return Err(anyhow!(
+            "--resume cannot be combined with targets or --ports"
+        ));
+    }
+    validate_output_format(&args.output).map_err(|e| anyhow!("{e}"))?;
+    let db_path = args.db.clone().map_or_else(default_db_path, PathBuf::from);
+    let storage = Storage::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+    let stored = storage.load_scan(resume_id).map_err(|e| anyhow!("{e}"))?;
+    if stored.status != "running" {
+        return Err(anyhow!(
+            "scan {resume_id} is '{}'; only interrupted scans can resume",
+            stored.status
+        ));
+    }
+    let mut config = Config::load(args.config.as_deref()).map_err(|e| anyhow!("{e}"))?;
+    apply_overrides(&mut config.limits, args.concurrency, args.rate)?;
+    let settings = effective_settings(
+        args.profile,
+        &config,
+        None,
+        args.service_detection,
+        args.banner,
+        args.skip_host_discovery,
+    );
+    // The scope was confirmed when the scan first ran; rebuild the guard from
+    // the same declared targets. Hostnames parse leniently here because the
+    // stored resolution is reused, not re-resolved.
+    let targets = parse_targets(&stored.targets, true, config.limits.max_hosts)
+        .map_err(|e| anyhow!("{e}"))?;
+    let guard = ScopeGuard::from_targets(&targets);
+    let summary = format!(
+        "Authorized use only: scan only systems you own or have written permission to test.\n\
+         resuming scan: {resume_id}\n\
+         targets: {}\n\
+         ports: {} outstanding",
+        model::sanitize(&stored.targets.join(" ")),
+        stored.ports.len(),
+    );
+    if !confirm_scope(&summary, args.yes, args.output != "terminal")? {
+        println!("Aborted. No traffic sent.");
+        return Ok(());
+    }
+    let prepared = PreparedScan {
+        scan_id: stored.scan_id.clone(),
+        config,
+        ports: stored.ports.clone(),
+        targets,
+        guard,
+        skip_discovery: settings.skip_discovery,
+        detect: settings.detect,
+        storage,
+    };
+    let scan = run_bounded(&prepared, Some(&stored)).await?;
+    maybe_finish(&prepared, &scan)?;
     emit(&scan, &args.output);
     Ok(())
 }
@@ -462,11 +619,15 @@ async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result
         raw_targets: std::slice::from_ref(&arg.target).to_vec(),
         allow_hostnames: arg.allow_hostnames,
         port_spec: None,
-        profile_default_ports: "standard".to_owned(),
+        profile: Profile::Standard,
+        service_detection: matches!(mode, TargetMode::Services),
+        banner: false,
+        skip_discovery: false,
         output: "terminal".to_owned(),
         concurrency: None,
         rate: None,
         config_path: None,
+        db_path: None,
         yes: arg.yes,
     })?
     else {
@@ -497,9 +658,9 @@ async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result
         print!("{}", model::host_table(&hosts));
         return Ok(());
     }
-    let detect = matches!(mode, TargetMode::Services);
-    let scan = run_bounded(&prepared, false, detect).await?;
-    if detect {
+    let scan = run_bounded(&prepared, None).await?;
+    maybe_finish(&prepared, &scan)?;
+    if matches!(mode, TargetMode::Services) {
         print!("{}", model::service_table(&scan));
     } else {
         emit(&scan, "terminal");
@@ -507,7 +668,60 @@ async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result
     Ok(())
 }
 
-/// Dispatch any subcommand; history/compare arrive in Phase 4.
+async fn run_history(args: &HistoryArgs) -> anyhow::Result<()> {
+    validate_machine_output(&args.output).map_err(|e| anyhow!("{e}"))?;
+    let db_path = args.db.clone().map_or_else(default_db_path, PathBuf::from);
+    let storage = Storage::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+    let scans = storage.list_scans().map_err(|e| anyhow!("{e}"))?;
+    if args.output == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&scans).unwrap_or_else(|_| "[]".to_owned())
+        );
+        return Ok(());
+    }
+    println!("SCAN_ID\tSTATUS\tSTARTED\tTARGETS\tHOSTS\tOPEN");
+    for scan in scans {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            scan.scan_id,
+            scan.status,
+            scan.started_unix_secs,
+            model::sanitize(&scan.targets.join(" ")),
+            scan.host_count,
+            scan.open_port_count
+        );
+    }
+    Ok(())
+}
+
+fn emit_comparison(comparison: &Comparison, output: &str) {
+    if output == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(comparison).unwrap_or_else(|_| "{}".to_owned())
+        );
+    } else {
+        print!("{}", comparison_table(comparison));
+    }
+}
+
+async fn run_compare(
+    scan_a: &str,
+    scan_b: &str,
+    db: &Option<String>,
+    output: &str,
+) -> anyhow::Result<()> {
+    validate_machine_output(output).map_err(|e| anyhow!("{e}"))?;
+    let db_path = db.clone().map_or_else(default_db_path, PathBuf::from);
+    let storage = Storage::open(&db_path).map_err(|e| anyhow!("{e}"))?;
+    let older = storage.load_full_scan(scan_a).map_err(|e| anyhow!("{e}"))?;
+    let newer = storage.load_full_scan(scan_b).map_err(|e| anyhow!("{e}"))?;
+    emit_comparison(&compare(&older, &newer), output);
+    Ok(())
+}
+
+/// Dispatch any subcommand; OS detection arrives in Phase 5.
 pub async fn run(command: &Command) -> anyhow::Result<()> {
     match command {
         Command::Scan(args) => run_scan(args).await,
@@ -519,13 +733,9 @@ pub async fn run(command: &Command) -> anyhow::Result<()> {
         Command::Hosts(arg) => run_target_command(arg, TargetMode::Hosts).await,
         Command::Ports(arg) => run_target_command(arg, TargetMode::Ports).await,
         Command::Services(arg) => run_target_command(arg, TargetMode::Services).await,
-        Command::History => {
-            println!("'history' arrives in Phase 4; Phase 3 prints to the terminal.");
-            Ok(())
-        }
-        Command::Compare(_) => {
-            println!("'compare' arrives in Phase 4; Phase 3 prints to the terminal.");
-            Ok(())
+        Command::History(args) => run_history(args).await,
+        Command::Compare(args) => {
+            run_compare(&args.scan_a, &args.scan_b, &args.db, &args.output).await
         }
     }
 }
@@ -548,6 +758,8 @@ mod tests {
             skip_host_discovery: false,
             allow_hostnames: false,
             config: None,
+            db: None,
+            resume: None,
             yes: true,
         }
     }
@@ -568,6 +780,19 @@ mod tests {
     #[tokio::test]
     async fn rejects_malformed_ports_without_traffic() {
         let args = scan_args(&["127.0.0.1"], "0");
+        assert!(run_scan(&args).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_targets_without_resume() {
+        let args = scan_args(&[], "80");
+        assert!(run_scan(&args).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_resume_with_targets() {
+        let mut args = scan_args(&["127.0.0.1"], "80");
+        args.resume = Some("01NEVER".to_owned());
         assert!(run_scan(&args).await.is_err());
     }
 

@@ -66,8 +66,18 @@ fn lab_state() -> (Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<Mutex<Vec<Instant>>>)
 }
 
 async fn run_scan(args: &[String]) -> (bool, String) {
+    let db = std::env::temp_dir().join(format!(
+        "sentinelscan-tcp-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let mut full: Vec<String> = args.to_vec();
+    full.extend(["--db".to_owned(), db.to_str().expect("utf8").to_owned()]);
     let output = tokio::process::Command::new(binary())
-        .args(args)
+        .args(&full)
         .output()
         .await
         .expect("run binary");

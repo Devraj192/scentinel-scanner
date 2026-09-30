@@ -44,7 +44,7 @@ impl std::fmt::Display for HostStatus {
 }
 
 /// One TCP port result. Service fields stay empty until Phase 3 fills them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortResult {
     pub port: u16,
     pub protocol: String,
@@ -59,7 +59,7 @@ pub struct PortResult {
 }
 
 /// A collected service banner. `raw` never serializes; JSON carries `text`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Banner {
     pub text: String,
     pub encoding: String,
@@ -69,7 +69,7 @@ pub struct Banner {
 }
 
 /// One host in the canonical result model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostResult {
     pub address: String,
     pub status: HostStatus,
@@ -78,7 +78,7 @@ pub struct HostResult {
 }
 
 /// Scan metadata. Every scan carries a unique ULID `scan_id`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanMeta {
     pub scan_id: String,
     pub version: String,
@@ -90,8 +90,8 @@ pub struct ScanMeta {
     pub peak_active_probes: usize,
 }
 
-/// Canonical scan result. Terminal, JSON, and (Phase 4) SQLite all derive from this.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Canonical scan result. Terminal, JSON, CSV, and SQLite all derive from this.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scan {
     pub meta: ScanMeta,
     pub targets: Vec<String>,

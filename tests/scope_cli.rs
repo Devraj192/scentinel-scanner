@@ -7,6 +7,7 @@ fn binary() -> String {
 
 #[test]
 fn scan_prints_scope_then_results_table() {
+    let db = std::env::temp_dir().join(format!("sentinelscan-scope-{}.db", std::process::id()));
     let output = Command::new(binary())
         .args([
             "scan",
@@ -15,6 +16,8 @@ fn scan_prints_scope_then_results_table() {
             "80",
             "--yes",
             "--skip-host-discovery",
+            "--db",
+            db.to_str().expect("utf8"),
         ])
         .output()
         .expect("run binary");

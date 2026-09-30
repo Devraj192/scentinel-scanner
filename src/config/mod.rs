@@ -113,11 +113,27 @@ impl Limits {
     }
 }
 
+/// Per-profile overrides loaded from `[profiles.<name>]` tables. Every field
+/// is optional; missing fields fall back to the built-in profile behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileSettings {
+    #[serde(default)]
+    pub ports: Option<String>,
+    #[serde(default)]
+    pub service_detection: Option<bool>,
+    #[serde(default)]
+    pub banner: Option<bool>,
+    #[serde(default)]
+    pub skip_host_discovery: Option<bool>,
+}
+
 /// Top-level configuration: limits plus the path it was loaded from, if any.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub limits: Limits,
+    #[serde(default)]
+    pub profiles: std::collections::HashMap<String, ProfileSettings>,
     #[serde(skip)]
     pub source: Option<String>,
 }
@@ -130,6 +146,7 @@ impl Config {
             None => {
                 let cfg = Self {
                     limits: Limits::default(),
+                    profiles: std::collections::HashMap::new(),
                     source: None,
                 };
                 cfg.limits.validate()?;

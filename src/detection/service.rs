@@ -15,7 +15,7 @@ pub enum EvidenceKind {
 }
 
 /// One fact behind a detection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
     pub kind: EvidenceKind,
     pub detail: String,

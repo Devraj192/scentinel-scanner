@@ -1,6 +1,9 @@
 # Build output
 /target/
 
+# Local scan history (created by runs without --db)
+/.sentinelscan/
+
 # Documents / planning files (local only, never pushed)
 .docs/
 .rules/

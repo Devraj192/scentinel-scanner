@@ -7,3 +7,4 @@ pub mod protocols;
 pub mod results;
 pub mod safety;
 pub mod scanner;
+pub mod storage;

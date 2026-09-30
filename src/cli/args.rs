@@ -23,9 +23,9 @@ pub enum Command {
     Ports(TargetArg),
     /// Detect services (Phase 3).
     Services(TargetArg),
-    /// Show scan history (Phase 4).
-    History,
-    /// Compare two scans (Phase 4).
+    /// Show scan history.
+    History(HistoryArgs),
+    /// Compare two scans.
     Compare(CompareArgs),
     /// Show effective configuration.
     Config(ConfigArgs),
@@ -35,7 +35,7 @@ pub enum Command {
 #[derive(Debug, Clone, Parser)]
 pub struct ScanArgs {
     /// Targets: IPv4, IPv6, CIDR, or hostname (hostnames need --allow-hostnames).
-    #[arg(required = true)]
+    /// Empty only with --resume, which reuses the stored scope.
     pub targets: Vec<String>,
     /// Ports: single, list, range, or named profile (quick, standard, full).
     #[arg(long)]
@@ -70,6 +70,12 @@ pub struct ScanArgs {
     /// Path to TOML config file.
     #[arg(long)]
     pub config: Option<String>,
+    /// Path to SQLite history database.
+    #[arg(long)]
+    pub db: Option<String>,
+    /// Resume an interrupted scan instead of starting a new one.
+    #[arg(long)]
+    pub resume: Option<String>,
     /// Skip the confirmation prompt (automation).
     #[arg(long, default_value_t = false)]
     pub yes: bool,
@@ -89,10 +95,26 @@ pub struct TargetArg {
 
 #[derive(Debug, Clone, Parser)]
 pub struct CompareArgs {
-    /// First scan id.
+    /// First scan id (baseline).
     pub scan_a: String,
     /// Second scan id.
     pub scan_b: String,
+    /// Path to SQLite history database.
+    #[arg(long)]
+    pub db: Option<String>,
+    /// Output format (terminal or json).
+    #[arg(long, default_value = "terminal")]
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct HistoryArgs {
+    /// Path to SQLite history database.
+    #[arg(long)]
+    pub db: Option<String>,
+    /// Output format (terminal or json).
+    #[arg(long, default_value = "terminal")]
+    pub output: String,
 }
 
 #[derive(Debug, Clone, Parser)]

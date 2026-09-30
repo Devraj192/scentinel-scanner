@@ -32,4 +32,13 @@ impl Profile {
             Self::Custom => "standard",
         }
     }
+
+    /// Config-file section name for profile overrides.
+    pub fn section(&self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Standard => "standard",
+            Self::Custom => "custom",
+        }
+    }
 }
