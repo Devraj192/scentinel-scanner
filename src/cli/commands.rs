@@ -5,9 +5,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use super::args::{Command, ScanArgs, TargetArg};
 use crate::config::{Config, Limits};
+use crate::detection::identify;
 use crate::discovery::host::discover_all;
 use crate::errors::Error;
 use crate::results::model::{self, HostResult, HostStatus, PortResult, Scan};
@@ -16,9 +18,10 @@ use crate::safety::ports::parse_ports;
 use crate::safety::scope::{host_count, parse_targets, ParsedTarget, ScopeGuard};
 use crate::scanner::rate_limit::RateLimiter;
 use crate::scanner::scheduler::scan_ports;
+use crate::scanner::timeout;
 
 /// Print the pre-scan scope summary and require `y` unless `--yes` was given.
-/// In json mode the summary and prompt go to stderr so stdout stays pure JSON.
+/// Machine-readable modes keep stdout pure, so the summary goes to stderr.
 fn confirm_scope(summary: &str, yes: bool, use_stderr: bool) -> anyhow::Result<bool> {
     if use_stderr {
         eprintln!("{summary}");
@@ -47,10 +50,7 @@ fn confirm_scope(summary: &str, yes: bool, use_stderr: bool) -> anyhow::Result<b
 
 fn validate_output_format(output: &str) -> Result<(), Error> {
     match output {
-        "terminal" | "json" => Ok(()),
-        "csv" => Err(Error::Config(
-            "csv output arrives in Phase 3; use terminal or json".to_owned(),
-        )),
+        "terminal" | "json" | "csv" => Ok(()),
         other => Err(Error::Config(format!(
             "unknown output '{other}' (terminal|json|csv)"
         ))),
@@ -176,7 +176,7 @@ fn prepare(request: &PrepareRequest) -> anyhow::Result<Option<PreparedScan>> {
         config.limits.max_rate,
         model::sanitize(&request.output),
     );
-    if !confirm_scope(&summary, request.yes, request.output == "json")? {
+    if !confirm_scope(&summary, request.yes, request.output != "terminal")? {
         println!("Aborted. No traffic sent.");
         return Ok(None);
     }
@@ -209,8 +209,13 @@ fn apply_overrides(
     Ok(())
 }
 
-/// Discover hosts then scan ports on everything not `down`.
-async fn run_phases(prepared: &PreparedScan, skip_discovery: bool) -> anyhow::Result<Scan> {
+/// Discover hosts then scan ports on everything not `down`. When `detect` is
+/// set, only open ports reach service detection, one detector at a time.
+async fn run_phases(
+    prepared: &PreparedScan,
+    skip_discovery: bool,
+    detect: bool,
+) -> anyhow::Result<Scan> {
     let target_names: Vec<String> = prepared.targets.iter().map(ToString::to_string).collect();
     let mut scan = Scan::start(prepared.scan_id.clone(), target_names);
     let resolved = resolve_targets(
@@ -318,19 +323,84 @@ async fn run_phases(prepared: &PreparedScan, skip_discovery: bool) -> anyhow::Re
                 reason: probe.outcome.reason.to_owned(),
                 latency_ms: probe.outcome.latency_ms,
                 service: None,
+                version: None,
+                confidence: None,
+                evidence: Vec::new(),
+                banner: None,
             });
         }
     }
     scan.hosts = hosts;
+    if detect {
+        identify_services(
+            &mut scan,
+            prepared,
+            Arc::clone(&semaphore),
+            Arc::clone(&rate),
+        )
+        .await;
+    }
     scan.finish();
     tracing::info!(scan_id = %scan.meta.scan_id, event = "scan_completed");
     Ok(scan)
 }
 
+/// Run service detection on open ports only. Probe latency and state stay as
+/// the port scan measured them; detection fills service fields and banners.
+async fn identify_services(
+    scan: &mut Scan,
+    prepared: &PreparedScan,
+    semaphore: Arc<Semaphore>,
+    rate: Arc<RateLimiter>,
+) {
+    let mut set = JoinSet::new();
+    for (host_index, host) in scan.hosts.iter().enumerate() {
+        let Ok(ip) = host.address.parse::<IpAddr>() else {
+            continue;
+        };
+        for (port_index, port) in host.ports.iter().enumerate() {
+            if port.state != crate::results::model::PortState::Open {
+                continue;
+            }
+            let semaphore = Arc::clone(&semaphore);
+            let rate = Arc::clone(&rate);
+            let limits = prepared.config.limits.clone();
+            let guard = prepared.guard.clone();
+            let port_number = port.port;
+            set.spawn(async move {
+                let detected = identify(ip, port_number, &limits, &guard, &semaphore, &rate).await;
+                (host_index, port_index, detected)
+            });
+        }
+    }
+    let (done, join_errors, cancelled) = timeout::join_cancellable(&mut set).await;
+    if cancelled || join_errors > 0 {
+        scan.meta.truncated = true;
+    }
+    for (host_index, port_index, detected) in done {
+        let Some(port) = scan
+            .hosts
+            .get_mut(host_index)
+            .and_then(|host| host.ports.get_mut(port_index))
+        else {
+            continue;
+        };
+        port.service = detected.service;
+        port.version = detected.version;
+        port.confidence = detected.confidence;
+        port.evidence = detected.evidence;
+        port.banner = detected.banner;
+    }
+}
+
 /// Bound the whole scan (discovery plus ports) by `max_scan_duration_secs`.
-async fn run_bounded(prepared: &PreparedScan, skip_discovery: bool) -> anyhow::Result<Scan> {
+async fn run_bounded(
+    prepared: &PreparedScan,
+    skip_discovery: bool,
+    detect: bool,
+) -> anyhow::Result<Scan> {
     let duration = Duration::from_secs(prepared.config.limits.max_scan_duration_secs.max(1));
-    match tokio::time::timeout(duration, run_phases(prepared, skip_discovery)).await {
+    match tokio::time::timeout(duration, run_phases(prepared, skip_discovery, detect)).await {
         Ok(scan) => scan,
         Err(_) => Err(anyhow!("scan duration exceeded max_scan_duration_secs")),
     }
@@ -339,6 +409,7 @@ async fn run_bounded(prepared: &PreparedScan, skip_discovery: bool) -> anyhow::R
 fn emit(scan: &Scan, output: &str) {
     match output {
         "json" => println!("{}", model::to_json(scan)),
+        "csv" => print!("{}", model::to_csv(scan)),
         _ => {
             print!("{}", model::terminal_table(scan));
             if scan.meta.truncated {
@@ -348,18 +419,15 @@ fn emit(scan: &Scan, output: &str) {
     }
 }
 
-/// Run the `scan` subcommand end to end.
+/// Run the `scan` subcommand end to end. The Standard profile enables service
+/// detection and banners; Quick leaves them off unless explicitly requested.
 pub async fn run_scan(args: &ScanArgs) -> anyhow::Result<()> {
-    for (flag, phase) in [
-        (args.service_detection, "3"),
-        (args.banner, "3"),
-        (args.os_detection, "5"),
-    ] {
-        if flag {
-            eprintln!("Note: detection flags arrive in Phase {phase}; continuing without them.");
-            break;
-        }
+    if args.os_detection {
+        eprintln!("Note: OS detection arrives in Phase 5; continuing without it.");
     }
+    let detect = args.service_detection
+        || args.banner
+        || args.profile == crate::config::profiles::Profile::Standard;
     let Some(prepared) = prepare(&PrepareRequest {
         raw_targets: args.targets.clone(),
         allow_hostnames: args.allow_hostnames,
@@ -374,20 +442,26 @@ pub async fn run_scan(args: &ScanArgs) -> anyhow::Result<()> {
     else {
         return Ok(());
     };
-    let scan = run_bounded(&prepared, args.skip_host_discovery).await?;
+    let scan = run_bounded(&prepared, args.skip_host_discovery, detect).await?;
     emit(&scan, &args.output);
     Ok(())
 }
 
-async fn run_target_command(
-    arg: &TargetArg,
-    ports: Option<String>,
-    discover_only: bool,
-) -> anyhow::Result<()> {
+/// What a single-target subcommand does after scope confirmation.
+enum TargetMode {
+    /// Discovery only.
+    Hosts,
+    /// Discovery plus port scan.
+    Ports,
+    /// Discovery plus port scan plus service detection, service view.
+    Services,
+}
+
+async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result<()> {
     let Some(prepared) = prepare(&PrepareRequest {
         raw_targets: std::slice::from_ref(&arg.target).to_vec(),
         allow_hostnames: arg.allow_hostnames,
-        port_spec: ports,
+        port_spec: None,
         profile_default_ports: "standard".to_owned(),
         output: "terminal".to_owned(),
         concurrency: None,
@@ -398,7 +472,7 @@ async fn run_target_command(
     else {
         return Ok(());
     };
-    if discover_only {
+    if matches!(mode, TargetMode::Hosts) {
         let resolved = resolve_targets(
             &prepared.targets,
             &prepared.guard,
@@ -423,12 +497,17 @@ async fn run_target_command(
         print!("{}", model::host_table(&hosts));
         return Ok(());
     }
-    let scan = run_bounded(&prepared, false).await?;
-    emit(&scan, "terminal");
+    let detect = matches!(mode, TargetMode::Services);
+    let scan = run_bounded(&prepared, false, detect).await?;
+    if detect {
+        print!("{}", model::service_table(&scan));
+    } else {
+        emit(&scan, "terminal");
+    }
     Ok(())
 }
 
-/// Dispatch any subcommand; `services` arrives in Phase 3, history/compare in Phase 4.
+/// Dispatch any subcommand; history/compare arrive in Phase 4.
 pub async fn run(command: &Command) -> anyhow::Result<()> {
     match command {
         Command::Scan(args) => run_scan(args).await,
@@ -437,18 +516,15 @@ pub async fn run(command: &Command) -> anyhow::Result<()> {
             println!("{}", toml::to_string(&config.limits).unwrap_or_default());
             Ok(())
         }
-        Command::Hosts(arg) => run_target_command(arg, None, true).await,
-        Command::Ports(arg) => run_target_command(arg, None, false).await,
-        Command::Services(_) => {
-            println!("'services' arrives in Phase 3; Phase 2 scans ports only.");
-            Ok(())
-        }
+        Command::Hosts(arg) => run_target_command(arg, TargetMode::Hosts).await,
+        Command::Ports(arg) => run_target_command(arg, TargetMode::Ports).await,
+        Command::Services(arg) => run_target_command(arg, TargetMode::Services).await,
         Command::History => {
-            println!("'history' arrives in Phase 4; Phase 2 prints to the terminal.");
+            println!("'history' arrives in Phase 4; Phase 3 prints to the terminal.");
             Ok(())
         }
         Command::Compare(_) => {
-            println!("'compare' arrives in Phase 4; Phase 2 prints to the terminal.");
+            println!("'compare' arrives in Phase 4; Phase 3 prints to the terminal.");
             Ok(())
         }
     }

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::detection::service::Evidence;
+
 /// Port state per PRD 3.3. A timeout is never `closed`; local errors are
 /// `unknown`, never a guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +43,7 @@ impl std::fmt::Display for HostStatus {
     }
 }
 
-/// One TCP port result. Service fields stay `None` until Phase 3 fills them.
+/// One TCP port result. Service fields stay empty until Phase 3 fills them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortResult {
     pub port: u16,
@@ -50,6 +52,20 @@ pub struct PortResult {
     pub reason: String,
     pub latency_ms: u64,
     pub service: Option<String>,
+    pub version: Option<String>,
+    pub confidence: Option<f32>,
+    pub evidence: Vec<Evidence>,
+    pub banner: Option<Banner>,
+}
+
+/// A collected service banner. `raw` never serializes; JSON carries `text`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Banner {
+    pub text: String,
+    pub encoding: String,
+    pub truncated: bool,
+    #[serde(skip)]
+    pub raw: Vec<u8>,
 }
 
 /// One host in the canonical result model.
@@ -150,6 +166,65 @@ pub fn terminal_table(scan: &Scan) -> String {
     out
 }
 
+/// HOST / PORT / SERVICE / VERSION / CONFIDENCE table over open ports.
+pub fn service_table(scan: &Scan) -> String {
+    let mut out = String::from("HOST\tPORT\tSERVICE\tVERSION\tCONFIDENCE\n");
+    for host in &scan.hosts {
+        for port in &host.ports {
+            if port.state != PortState::Open {
+                continue;
+            }
+            let confidence = port
+                .confidence
+                .map(|confidence| format!("{confidence:.2}"))
+                .unwrap_or_else(|| "-".to_owned());
+            out.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\n",
+                sanitize(&host.address),
+                port.port,
+                sanitize(port.service.as_deref().unwrap_or("-")),
+                sanitize(port.version.as_deref().unwrap_or("-")),
+                confidence,
+            ));
+        }
+    }
+    out
+}
+
+fn csv_field(text: &str) -> String {
+    if text.contains([',', '"', '\n']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_owned()
+    }
+}
+
+/// CSV encoding of the canonical model, one row per scanned port.
+pub fn to_csv(scan: &Scan) -> String {
+    let mut out =
+        String::from("scan_id,host,port,protocol,state,reason,service,version,confidence\n");
+    for host in &scan.hosts {
+        for port in &host.ports {
+            let confidence = port
+                .confidence
+                .map(|confidence| format!("{confidence:.2}"))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{}\n",
+                csv_field(&scan.meta.scan_id),
+                csv_field(&host.address),
+                port.port,
+                csv_field(&port.protocol),
+                port.state,
+                csv_field(&port.reason),
+                csv_field(port.service.as_deref().unwrap_or("")),
+                csv_field(port.version.as_deref().unwrap_or("")),
+                confidence,
+            ));
+        }
+    }
+    out
+}
 /// HOST / STATUS / LATENCY table for discovery-only output.
 pub fn host_table(hosts: &[HostResult]) -> String {
     let mut out = String::from("HOST\tSTATUS\tLATENCY_MS\n");
@@ -186,7 +261,11 @@ mod tests {
                 state: PortState::Open,
                 reason: "handshake".to_owned(),
                 latency_ms: 1,
-                service: None,
+                service: Some("http".to_owned()),
+                version: Some("TestLab/1.0".to_owned()),
+                confidence: Some(0.9),
+                evidence: Vec::new(),
+                banner: None,
             }],
         });
         scan.finish();
@@ -194,6 +273,31 @@ mod tests {
         let back: Scan = serde_json::from_str(&text).expect("round trip");
         assert_eq!(back.hosts.len(), 1);
         assert_eq!(back.hosts[0].ports[0].state, PortState::Open);
+    }
+
+    #[test]
+    fn csv_quotes_hostile_fields() {
+        let mut scan = Scan::start("01TEST".to_owned(), vec![]);
+        scan.hosts.push(HostResult {
+            address: "a,b".to_owned(),
+            status: HostStatus::Up,
+            latency_ms: 1,
+            ports: vec![PortResult {
+                port: 80,
+                protocol: "tcp".to_owned(),
+                state: PortState::Open,
+                reason: "handshake".to_owned(),
+                latency_ms: 1,
+                service: Some("x\"y".to_owned()),
+                version: None,
+                confidence: None,
+                evidence: Vec::new(),
+                banner: None,
+            }],
+        });
+        let csv = to_csv(&scan);
+        assert!(csv.contains("\"a,b\""));
+        assert!(csv.contains("\"x\"\"y\""));
     }
 
     #[test]

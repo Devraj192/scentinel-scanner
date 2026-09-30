@@ -1,7 +1,9 @@
 pub mod cli;
 pub mod config;
+pub mod detection;
 pub mod discovery;
 pub mod errors;
+pub mod protocols;
 pub mod results;
 pub mod safety;
 pub mod scanner;
