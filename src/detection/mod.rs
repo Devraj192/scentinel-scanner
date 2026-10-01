@@ -43,6 +43,11 @@ pub struct ActiveCtx {
 /// Identify the service on one open port: passive banner match first, then at
 /// most one active probe per detector, first confident match wins, Generic
 /// always matches last. Never fails: the worst outcome is `unknown`.
+///
+/// Traffic budget per open port, on top of the one handshake the port scan
+/// already made: one passive banner connection, then at most one HTTP `GET`
+/// and one DNS query, each only while no earlier detector matched. Closed,
+/// filtered, and unknown ports cost nothing here.
 pub async fn identify(
     ip: IpAddr,
     port: u16,

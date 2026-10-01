@@ -5,7 +5,7 @@ use sentinelscan::results::model::{
     PortResult, PortState, Scan,
 };
 use sentinelscan::safety::ports::parse_ports;
-use sentinelscan::safety::scope::parse_targets;
+use sentinelscan::safety::scope::{parse_single_target, parse_targets};
 use sentinelscan::storage::compare;
 
 /// Deterministic xorshift64: reproducible adversarial inputs, no new crates.
@@ -70,7 +70,9 @@ fn has_bare_control(text: &str) -> bool {
 }
 
 #[test]
-fn parsers_never_panic_and_reject_garbage() {
+fn parsers_reject_garbage_with_typed_errors() {
+    use sentinelscan::Error;
+
     let mut rng = Rng(0xC0FFEE);
     let seeds: &[&[u8]] = &[
         b"127.0.0.1",
@@ -84,25 +86,70 @@ fn parsers_never_panic_and_reject_garbage() {
         b"80,443",
         b"quick",
     ];
+    let mut accepted_targets = 0;
+    let mut rejected_targets = 0;
+    let mut accepted_ports = 0;
+    let mut rejected_ports = 0;
     for _ in 0..2000 {
         let seed = seeds[rng.below(seeds.len())];
-        let input = rng.mutate(seed);
-        let text = String::from_utf8_lossy(&input).into_owned();
-        let target_result = parse_targets(std::slice::from_ref(&text), true, 256);
-        assert!(
-            target_result.is_ok() || target_result.is_err(),
-            "parse_targets returned"
-        );
-        let port_result = parse_ports(&text, 1024);
-        if let Ok(ports) = port_result {
-            assert!(!ports.is_empty());
-            assert!(
-                ports.windows(2).all(|pair| pair[0] < pair[1]),
-                "sorted, deduped"
-            );
-            assert!(ports.iter().all(|port| (1..=65535).contains(port)));
+        // The raw seed exercises the valid side; the mutation the hostile one.
+        let candidates = [
+            String::from_utf8_lossy(seed).into_owned(),
+            String::from_utf8_lossy(&rng.mutate(seed)).into_owned(),
+        ];
+        for text in candidates {
+            match parse_targets(std::slice::from_ref(&text), true, 256) {
+                Ok(targets) => {
+                    accepted_targets += 1;
+                    // Accepted targets are well-formed: they display and re-parse.
+                    for target in &targets {
+                        let shown = target.to_string();
+                        assert!(!shown.is_empty());
+                        assert!(
+                            parse_single_target(&shown, true).is_ok(),
+                            "accepted target must re-parse: {shown}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    rejected_targets += 1;
+                    // Rejections name the problem; scope violations never arise
+                    // from parsing alone.
+                    assert!(
+                        matches!(e, Error::InvalidTarget { .. } | Error::LimitExceeded(_)),
+                        "unexpected rejection kind: {e}"
+                    );
+                }
+            }
+
+            match parse_ports(&text, 1024) {
+                Ok(ports) => {
+                    accepted_ports += 1;
+                    assert!(!ports.is_empty());
+                    assert!(
+                        ports.windows(2).all(|pair| pair[0] < pair[1]),
+                        "sorted, deduped"
+                    );
+                    assert!(ports.iter().all(|port| (1..=65535).contains(port)));
+                }
+                Err(e) => {
+                    rejected_ports += 1;
+                    assert!(
+                        matches!(e, Error::InvalidPort { .. } | Error::LimitExceeded(_)),
+                        "unexpected rejection kind: {e}"
+                    );
+                }
+            }
         }
     }
+    // The seed mix must exercise both sides; otherwise the test proves nothing.
+    assert!(accepted_targets > 100, "seeds should include valid targets");
+    assert!(rejected_targets > 100, "mutations should break targets");
+    assert!(
+        accepted_ports > 100,
+        "seeds should include valid port specs"
+    );
+    assert!(rejected_ports > 100, "mutations should break port specs");
 }
 
 #[test]

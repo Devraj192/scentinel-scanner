@@ -1,6 +1,6 @@
 [package]
 name = "sentinelscan"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Authorized-only network discovery and TCP port scanner"
 license = "MIT"
@@ -29,6 +29,7 @@ ulid = "1.2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+proptest = "1.0"
 
 [[bench]]
 name = "scan"

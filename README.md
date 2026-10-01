@@ -19,6 +19,8 @@ in local SQLite history for comparison.
 - [Port states](#port-states)
 - [Service and OS detection](#service-and-os-detection)
 - [Profiles](#profiles)
+- [Scan traffic](#scan-traffic)
+- [Operations](#operations)
 - [History, compare, resume](#history-compare-resume)
 - [Configuration](#configuration)
 - [Output formats](#output-formats)
@@ -154,6 +156,53 @@ and inference evidence separately. Confidence scores are the detector's own
 Explicit flags beat config-file `[profiles.*]` tables, which beat these
 built-ins. `--os-detection` implies service detection, since detection
 supplies the OS signals.
+
+## Scan traffic
+
+Know what a run sends before approving the scope prompt:
+
+- Host discovery: up to 4 TCP connects per host (fewer when the port list is
+  shorter), skipped entirely with `--skip-host-discovery`.
+- Port scan: exactly one TCP connect per host × port.
+- Service detection, per **open** port only: one passive banner connection,
+  then at most one HTTP `GET` and one DNS `version.bind` query, each only
+  while no earlier detector matched. Closed, filtered, and unknown ports
+  cost nothing here.
+- OS estimation and output rendering send nothing.
+
+A default Standard scan of one host × 100 closed ports is ~104 connects;
+every open port adds 1–3 more.
+
+## Operations
+
+**IPv6.** Parsed like IPv4, including CIDR (`::1`, `fd00::/64`), and scanned
+the same way. Zone IDs (`fe80::1%eth0`) are rejected: neither the address
+parser nor hostname syntax accepts `%`. Lab coverage is loopback (`::1`).
+
+**DNS.** Hostnames are rejected unless `--allow-hostnames` is passed. After
+scope confirmation, each hostname resolves once via async lookup and every
+returned IP is scanned. A name that fails to resolve stays in the report as
+`unknown`; the scan continues.
+
+**SQLite locking.** Each storage call opens its own short-lived connection
+with a 5-second busy timeout, and each scan phase commits in one
+transaction, so two scans sharing a `--db` file wait briefly instead of
+failing. For heavy parallel automation, prefer one `--db` per job.
+
+**Interrupted scans.** Ctrl-C and overall-timeout leave the scan `running`
+with a printed resume hint; SIGKILL leaves the same state by construction.
+`scan --resume <id>` reuses the stored scope and skips every saved probe.
+Finished scans refuse to resume.
+
+**Output compatibility.** JSON follows the canonical model: `meta`
+(`scan_id`, `version`, `started/finished_unix_secs`, `truncated`,
+`peak_active_probes`), `targets`, and `hosts[]` with `address`, `status`,
+`latency_ms`, `ports[]`, and nullable `os`. `banner.raw` never serializes;
+only the sanitized `text` is stored. `service`, `version`, and `confidence`
+are null until detection runs. CSV columns are fixed
+(`scan_id,host,port,protocol,state,reason,service,version,confidence`) with
+RFC 4180 quoting. Terminal tables are human views and may gain columns;
+scripts should read JSON or CSV.
 
 ## History, compare, resume
 

@@ -183,6 +183,12 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zone_ids() {
+        // std IpAddr carries no scope id, and % is not a hostname character.
+        assert!(parse_single_target("fe80::1%eth0", true).is_err());
+    }
+
+    #[test]
     fn hostname_needs_flag() {
         assert!(parse_single_target("example.com", false).is_err());
         assert!(parse_single_target("example.com", true).is_ok());

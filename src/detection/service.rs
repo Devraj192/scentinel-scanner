@@ -50,16 +50,23 @@ pub struct Detection {
 
 impl Detection {
     /// Confidence is clamped to 0.0-1.0; details from the wire are sanitized.
+    /// An empty service name is meaningless, so it becomes `unknown` at zero
+    /// confidence rather than propagating a blank claim.
     pub fn new(
         service: &str,
         version: Option<String>,
         confidence: f32,
         evidence: Vec<Evidence>,
     ) -> Self {
+        let (service, confidence) = if service.is_empty() {
+            ("unknown".to_owned(), 0.0)
+        } else {
+            (service.to_owned(), confidence.clamp(0.0, 1.0))
+        };
         Self {
-            service: service.to_owned(),
+            service,
             version: version.map(|version| sanitize(&version)),
-            confidence: confidence.clamp(0.0, 1.0),
+            confidence,
             evidence,
         }
     }
@@ -145,5 +152,12 @@ mod tests {
     #[test]
     fn clamps_confidence() {
         assert_eq!(Detection::new("ssh", None, 9.9, vec![]).confidence, 1.0);
+    }
+
+    #[test]
+    fn blank_service_becomes_unknown() {
+        let detection = Detection::new("", Some("1.0".to_owned()), 0.9, vec![]);
+        assert_eq!(detection.service, "unknown");
+        assert_eq!(detection.confidence, 0.0);
     }
 }

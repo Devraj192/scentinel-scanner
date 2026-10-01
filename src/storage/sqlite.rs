@@ -114,8 +114,12 @@ impl Storage {
     }
 
     fn connect(&self) -> Result<Connection, Error> {
-        Connection::open(&self.path)
-            .map_err(|e| Error::Storage(format!("cannot open {}: {e}", self.path.display())))
+        let conn = Connection::open(&self.path)
+            .map_err(|e| Error::Storage(format!("cannot open {}: {e}", self.path.display())))?;
+        // Two scans sharing one --db wait briefly instead of failing at once.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| Error::Storage(format!("busy_timeout: {e}")))?;
+        Ok(conn)
     }
 
     /// Start a scan row in `running` state with its scope attached.
@@ -155,21 +159,74 @@ impl Storage {
         latency_ms: u64,
     ) -> Result<(), Error> {
         let conn = self.connect()?;
-        conn.execute(
-            "INSERT INTO ports (scan_id, address, port, state, reason, latency_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT (scan_id, address, port) DO UPDATE SET
-               state = excluded.state, reason = excluded.reason, latency_ms = excluded.latency_ms",
-            params![
+        insert_probe_row(
+            &conn,
+            scan_id,
+            address,
+            port,
+            &state.to_string(),
+            reason,
+            latency_ms,
+        )?;
+        Ok(())
+    }
+
+    /// Persist a whole port-scan pass — every host with its probes — in one
+    /// transaction instead of one connection per row.
+    pub fn save_progress(&self, scan_id: &str, hosts: &[HostResult]) -> Result<(), Error> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| Error::Storage(format!("save_progress: {e}")))?;
+        for host in hosts {
+            upsert_host_row(
+                &tx,
                 scan_id,
-                address,
-                port,
-                state.to_string(),
-                reason,
-                latency_ms as i64
-            ],
-        )
-        .map_err(|e| Error::Storage(format!("save_probe: {e}")))?;
+                &host.address,
+                &host.status.to_string(),
+                host.latency_ms,
+                host.os.as_ref(),
+            )?;
+            for port in &host.ports {
+                insert_probe_row(
+                    &tx,
+                    scan_id,
+                    &host.address,
+                    port.port,
+                    &port.state.to_string(),
+                    &port.reason,
+                    port.latency_ms,
+                )?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| Error::Storage(format!("save_progress: {e}")))?;
+        Ok(())
+    }
+
+    /// Persist detection output for a whole pass in one transaction. A kill
+    /// mid-detection loses only unattributed service data; the probe rows
+    /// survive, so resume re-runs detection exactly where it stopped.
+    pub fn save_detections(&self, scan_id: &str, hosts: &[HostResult]) -> Result<(), Error> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| Error::Storage(format!("save_detections: {e}")))?;
+        for host in hosts {
+            upsert_host_row(
+                &tx,
+                scan_id,
+                &host.address,
+                &host.status.to_string(),
+                host.latency_ms,
+                host.os.as_ref(),
+            )?;
+            for port in &host.ports {
+                update_detection_row(&tx, scan_id, &host.address, port)?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| Error::Storage(format!("save_detections: {e}")))?;
         Ok(())
     }
 
@@ -181,32 +238,7 @@ impl Storage {
         port: &PortResult,
     ) -> Result<(), Error> {
         let conn = self.connect()?;
-        let (text, encoding, truncated) = match &port.banner {
-            Some(banner) => (
-                Some(banner.text.clone()),
-                Some(banner.encoding.clone()),
-                Some(i64::from(banner.truncated)),
-            ),
-            None => (None, None, None),
-        };
-        conn.execute(
-            "UPDATE ports SET service = ?4, version = ?5, confidence = ?6,
-               evidence_json = ?7, banner_text = ?8, banner_encoding = ?9, banner_truncated = ?10
-             WHERE scan_id = ?1 AND address = ?2 AND port = ?3",
-            params![
-                scan_id,
-                address,
-                port.port,
-                port.service,
-                port.version,
-                port.confidence.map(f64::from),
-                serde_json::to_string(&port.evidence).unwrap_or_else(|_| "[]".to_owned()),
-                text,
-                encoding,
-                truncated,
-            ],
-        )
-        .map_err(|e| Error::Storage(format!("update_detection: {e}")))?;
+        update_detection_row(&conn, scan_id, address, port)?;
         Ok(())
     }
 
@@ -220,36 +252,7 @@ impl Storage {
         os: Option<&OsGuess>,
     ) -> Result<(), Error> {
         let conn = self.connect()?;
-        let (family, version, confidence, evidence) = match os {
-            Some(os) => (
-                Some(os.family.clone()),
-                os.version.clone(),
-                Some(f64::from(os.confidence)),
-                serde_json::to_string(&os.evidence).unwrap_or_else(|_| "[]".to_owned()),
-            ),
-            None => (None, None, None, "[]".to_owned()),
-        };
-        conn.execute(
-            "INSERT INTO hosts (scan_id, address, status, latency_ms,
-               os_family, os_version, os_confidence, os_evidence_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT (scan_id, address) DO UPDATE SET
-               status = excluded.status, latency_ms = excluded.latency_ms,
-               os_family = excluded.os_family, os_version = excluded.os_version,
-               os_confidence = excluded.os_confidence,
-               os_evidence_json = excluded.os_evidence_json",
-            params![
-                scan_id,
-                address,
-                status.to_string(),
-                latency_ms as i64,
-                family,
-                version,
-                confidence,
-                evidence,
-            ],
-        )
-        .map_err(|e| Error::Storage(format!("save_host: {e}")))?;
+        upsert_host_row(&conn, scan_id, address, &status.to_string(), latency_ms, os)?;
         Ok(())
     }
 
@@ -566,6 +569,104 @@ fn decode_port_row(row: &PortRow) -> Result<PortResult, Error> {
         evidence,
         banner,
     })
+}
+
+/// Shared row writers used by single-row calls and batched transactions alike,
+/// so the two paths can never drift apart.
+fn insert_probe_row(
+    conn: &Connection,
+    scan_id: &str,
+    address: &str,
+    port: u16,
+    state: &str,
+    reason: &str,
+    latency_ms: u64,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO ports (scan_id, address, port, state, reason, latency_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (scan_id, address, port) DO UPDATE SET
+           state = excluded.state, reason = excluded.reason, latency_ms = excluded.latency_ms",
+        params![scan_id, address, port, state, reason, latency_ms as i64],
+    )
+    .map_err(|e| Error::Storage(format!("save_probe: {e}")))?;
+    Ok(())
+}
+
+fn upsert_host_row(
+    conn: &Connection,
+    scan_id: &str,
+    address: &str,
+    status: &str,
+    latency_ms: u64,
+    os: Option<&OsGuess>,
+) -> Result<(), Error> {
+    let (family, version, confidence, evidence) = match os {
+        Some(os) => (
+            Some(os.family.clone()),
+            os.version.clone(),
+            Some(f64::from(os.confidence)),
+            serde_json::to_string(&os.evidence).unwrap_or_else(|_| "[]".to_owned()),
+        ),
+        None => (None, None, None, "[]".to_owned()),
+    };
+    conn.execute(
+        "INSERT INTO hosts (scan_id, address, status, latency_ms,
+           os_family, os_version, os_confidence, os_evidence_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT (scan_id, address) DO UPDATE SET
+           status = excluded.status, latency_ms = excluded.latency_ms,
+           os_family = excluded.os_family, os_version = excluded.os_version,
+           os_confidence = excluded.os_confidence,
+           os_evidence_json = excluded.os_evidence_json",
+        params![
+            scan_id,
+            address,
+            status,
+            latency_ms as i64,
+            family,
+            version,
+            confidence,
+            evidence,
+        ],
+    )
+    .map_err(|e| Error::Storage(format!("save_host: {e}")))?;
+    Ok(())
+}
+
+fn update_detection_row(
+    conn: &Connection,
+    scan_id: &str,
+    address: &str,
+    port: &PortResult,
+) -> Result<(), Error> {
+    let (text, encoding, truncated) = match &port.banner {
+        Some(banner) => (
+            Some(banner.text.clone()),
+            Some(banner.encoding.clone()),
+            Some(i64::from(banner.truncated)),
+        ),
+        None => (None, None, None),
+    };
+    conn.execute(
+        "UPDATE ports SET service = ?4, version = ?5, confidence = ?6,
+           evidence_json = ?7, banner_text = ?8, banner_encoding = ?9, banner_truncated = ?10
+         WHERE scan_id = ?1 AND address = ?2 AND port = ?3",
+        params![
+            scan_id,
+            address,
+            port.port,
+            port.service,
+            port.version,
+            port.confidence.map(f64::from),
+            serde_json::to_string(&port.evidence).unwrap_or_else(|_| "[]".to_owned()),
+            text,
+            encoding,
+            truncated,
+        ],
+    )
+    .map_err(|e| Error::Storage(format!("update_detection: {e}")))?;
+    Ok(())
 }
 
 fn unix_now() -> u64 {
@@ -886,6 +987,42 @@ mod tests {
         back.meta.version = "0.0.0".to_owned();
         back.meta.started_unix_secs = 1;
         back.meta.finished_unix_secs = 2;
+        assert_eq!(back, expected);
+    }
+
+    #[test]
+    fn batched_writes_match_single_row_writes() {
+        let (_file, storage) = db();
+        let scan = scan_fixture("01BATCH");
+        storage
+            .begin_scan(&scan.meta.scan_id, &scan.targets, &[80], &[])
+            .expect("begin");
+        storage
+            .save_progress(&scan.meta.scan_id, &scan.hosts)
+            .expect("progress");
+        storage
+            .save_detections(&scan.meta.scan_id, &scan.hosts)
+            .expect("detections");
+        let back = storage.load_full_scan(&scan.meta.scan_id).expect("load");
+        let mut expected = scan;
+        for host in &mut expected.hosts {
+            for port in &mut host.ports {
+                if let Some(banner) = port.banner.as_mut() {
+                    banner.raw.clear();
+                }
+            }
+        }
+        let mut back = back;
+        back.meta.version = "0.0.0".to_owned();
+        back.meta.started_unix_secs = 1;
+        back.meta.finished_unix_secs = 2;
+        // Batch progress runs before finish_scan, so these stay at defaults.
+        back.meta.truncated = false;
+        back.meta.peak_active_probes = 0;
+        let mut expected_meta = expected.meta.clone();
+        expected_meta.truncated = false;
+        expected_meta.peak_active_probes = 0;
+        expected.meta = expected_meta;
         assert_eq!(back, expected);
     }
 

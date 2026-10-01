@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -365,17 +366,6 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
     scan.meta.peak_active_probes = port_scan.peak_active;
     for probe in port_scan.probes {
         let address = probe.ip.to_string();
-        prepared
-            .storage
-            .save_probe(
-                &scan_id,
-                &address,
-                probe.port,
-                probe.outcome.state,
-                probe.outcome.reason,
-                probe.outcome.latency_ms,
-            )
-            .map_err(|e| anyhow!("{e}"))?;
         if let Some(host) = hosts.iter_mut().find(|host| host.address == address) {
             host.ports.push(PortResult {
                 port: probe.port,
@@ -411,9 +401,14 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
     for host in &mut hosts {
         host.ports.sort_by_key(|port| port.port);
     }
+    // One transaction for the whole pass instead of one connection per row.
+    prepared
+        .storage
+        .save_progress(&scan_id, &hosts)
+        .map_err(|e| anyhow!("{e}"))?;
     scan.hosts = hosts;
     if prepared.detect {
-        identify_services(&mut scan, prepared, &scan_id, &semaphore, &rate).await;
+        identify_services(&mut scan, prepared, &semaphore, &rate).await;
     }
     // OS estimates need detected services; without them every guess would be
     // Unknown noise, so skip the stage entirely.
@@ -422,18 +417,11 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
             host.os = Some(crate::os::fingerprint(&host.ports));
         }
     }
-    for host in &scan.hosts {
-        prepared
-            .storage
-            .save_host(
-                &scan_id,
-                &host.address,
-                host.status,
-                host.latency_ms,
-                host.os.as_ref(),
-            )
-            .map_err(|e| anyhow!("{e}"))?;
-    }
+    // Hosts (with OS estimates) plus detection columns, one transaction.
+    prepared
+        .storage
+        .save_detections(&scan_id, &scan.hosts)
+        .map_err(|e| anyhow!("{e}"))?;
     scan.finish();
     tracing::info!(scan_id = %scan.meta.scan_id, event = "scan_completed");
     Ok(scan)
@@ -441,11 +429,10 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
 
 /// Run service detection on open ports lacking service data. Probe latency and
 /// state stay as the port scan measured them; detection fills service fields
-/// and banners, persisting each result as it completes.
+/// and banners. The caller persists the batch with one transaction.
 async fn identify_services(
     scan: &mut Scan,
     prepared: &PreparedScan,
-    scan_id: &str,
     semaphore: &Arc<Semaphore>,
     rate: &Arc<RateLimiter>,
 ) {
@@ -474,9 +461,6 @@ async fn identify_services(
         scan.meta.truncated = true;
     }
     for (host_index, port_index, detected) in done {
-        let Some(address) = scan.hosts.get(host_index).map(|host| host.address.clone()) else {
-            continue;
-        };
         let Some(port) = scan
             .hosts
             .get_mut(host_index)
@@ -489,12 +473,8 @@ async fn identify_services(
         port.confidence = detected.confidence;
         port.evidence = detected.evidence;
         port.banner = detected.banner;
-        if let Err(e) = prepared.storage.update_detection(scan_id, &address, port) {
-            tracing::warn!(%e, "detection result not persisted");
-        }
     }
 }
-use std::path::PathBuf;
 
 /// Bound the whole scan (discovery plus ports) by `max_scan_duration_secs`.
 async fn run_bounded(prepared: &PreparedScan, resume: Option<&StoredScan>) -> anyhow::Result<Scan> {
