@@ -19,7 +19,7 @@ use crate::results::model::{self, HostResult, HostStatus, PortResult, Scan};
 use crate::safety::ports::parse_ports;
 use crate::safety::scope::{host_count, parse_targets, ParsedTarget, ScopeGuard};
 use crate::scanner::rate_limit::RateLimiter;
-use crate::scanner::resolve::{resolve_targets, ResolvedHost};
+use crate::scanner::resolve::{authorize_resolved, resolve_targets, ResolvedHost};
 use crate::scanner::scheduler::scan_ports;
 use crate::scanner::timeout;
 use crate::storage::{compare, comparison_table, default_db_path, Comparison, Storage, StoredScan};
@@ -242,11 +242,17 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
         |stored| stored.targets.clone(),
     );
     let mut scan = Scan::start(scan_id.clone(), target_names);
+    // The guard gains every resolved address before any connect, so hostname
+    // targets pass the same `check_ip` as literal ones.
+    let mut guard = prepared.guard.clone();
     let resolved: Vec<ResolvedHost> = match resume {
-        Some(stored) => stored.resolved.clone(),
+        Some(stored) => {
+            authorize_resolved(&mut guard, &stored.resolved);
+            stored.resolved.clone()
+        }
         None => resolve_targets(
             &prepared.targets,
-            &prepared.guard,
+            &mut guard,
             prepared.config.limits.max_hosts,
         )
         .await
@@ -325,7 +331,7 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
             &pending,
             &ports,
             &prepared.config.limits,
-            &prepared.guard,
+            &guard,
             Arc::clone(&semaphore),
             Arc::clone(&rate),
         )
@@ -355,7 +361,7 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
         &scannable,
         &ports,
         &prepared.config.limits,
-        &prepared.guard,
+        &guard,
         Arc::clone(&rate),
         &skip,
     )
@@ -408,7 +414,14 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
         .map_err(|e| anyhow!("{e}"))?;
     scan.hosts = hosts;
     if prepared.detect {
-        identify_services(&mut scan, prepared, &semaphore, &rate).await;
+        identify_services(
+            &mut scan,
+            &prepared.config.limits,
+            &guard,
+            &semaphore,
+            &rate,
+        )
+        .await;
     }
     // OS estimates need detected services; without them every guess would be
     // Unknown noise, so skip the stage entirely.
@@ -432,7 +445,8 @@ async fn run_phases(prepared: &PreparedScan, resume: Option<&StoredScan>) -> any
 /// and banners. The caller persists the batch with one transaction.
 async fn identify_services(
     scan: &mut Scan,
-    prepared: &PreparedScan,
+    limits: &Limits,
+    guard: &ScopeGuard,
     semaphore: &Arc<Semaphore>,
     rate: &Arc<RateLimiter>,
 ) {
@@ -447,8 +461,8 @@ async fn identify_services(
             }
             let semaphore = Arc::clone(semaphore);
             let rate = Arc::clone(rate);
-            let limits = prepared.config.limits.clone();
-            let guard = prepared.guard.clone();
+            let limits = limits.clone();
+            let guard = guard.clone();
             let port_number = port.port;
             set.spawn(async move {
                 let detected = identify(ip, port_number, &limits, &guard, &semaphore, &rate).await;
@@ -642,9 +656,10 @@ async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result
         return Ok(());
     };
     if matches!(mode, TargetMode::Hosts) {
+        let mut guard = prepared.guard.clone();
         let resolved = resolve_targets(
             &prepared.targets,
-            &prepared.guard,
+            &mut guard,
             prepared.config.limits.max_hosts,
         )
         .await
@@ -658,7 +673,7 @@ async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result
             &ips,
             &prepared.ports,
             &prepared.config.limits,
-            &prepared.guard,
+            &guard,
             semaphore,
             rate,
         )
@@ -808,8 +823,8 @@ mod tests {
     #[tokio::test]
     async fn resolves_cidr() {
         let targets = parse_targets(&["127.0.0.0/30".to_owned()], false, 256).expect("parse");
-        let guard = ScopeGuard::from_targets(&targets);
-        let resolved = resolve_targets(&targets, &guard, 256)
+        let mut guard = ScopeGuard::from_targets(&targets);
+        let resolved = resolve_targets(&targets, &mut guard, 256)
             .await
             .expect("resolve");
         assert_eq!(resolved.len(), 2);

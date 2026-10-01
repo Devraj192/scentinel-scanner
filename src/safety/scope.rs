@@ -115,22 +115,25 @@ impl ScopeGuard {
         let mut guard = Self::default();
         for target in targets {
             match target {
-                ParsedTarget::Ip(ip) => {
-                    let net = match ip {
-                        IpAddr::V4(v4) => {
-                            IpNet::V4(ipnet::Ipv4Net::new(*v4, 32).expect("valid /32"))
-                        }
-                        IpAddr::V6(v6) => {
-                            IpNet::V6(ipnet::Ipv6Net::new(*v6, 128).expect("valid /128"))
-                        }
-                    };
-                    guard.nets.push(net);
-                }
+                ParsedTarget::Ip(ip) => guard.allow_ip(ip),
                 ParsedTarget::Cidr(net) => guard.nets.push(*net),
                 ParsedTarget::Hostname(name) => guard.hostnames.push(name.clone()),
             }
         }
         guard
+    }
+
+    /// Authorize one address: the /32 (or /128) it denotes. Used for IPs
+    /// resolved from explicitly authorized hostnames during a run; the guard
+    /// itself is rebuilt every run, so nothing leaks across scans.
+    pub fn allow_ip(&mut self, ip: &IpAddr) {
+        let net = match ip {
+            IpAddr::V4(v4) => IpNet::V4(ipnet::Ipv4Net::new(*v4, 32).expect("valid /32")),
+            IpAddr::V6(v6) => IpNet::V6(ipnet::Ipv6Net::new(*v6, 128).expect("valid /128")),
+        };
+        if !self.nets.contains(&net) {
+            self.nets.push(net);
+        }
     }
 
     /// Allow a connection to `ip` only when it falls inside the declared scope.

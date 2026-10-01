@@ -117,6 +117,48 @@ async fn open_port_is_open_and_host_is_up() {
 }
 
 #[tokio::test]
+async fn hostname_scan_reaches_resolved_host() {
+    let (current, max, arrivals) = lab_state();
+    let lab = LabListener::start(current, max, arrivals).await;
+    let config = fast_config();
+    let port = lab.port.to_string();
+    let (ok, stdout) = run_scan(&[
+        "scan".to_owned(),
+        "localhost".to_owned(),
+        "--allow-hostnames".to_owned(),
+        "--ports".to_owned(),
+        port.clone(),
+        "--yes".to_owned(),
+        "--skip-host-discovery".to_owned(),
+        "--profile".to_owned(),
+        "quick".to_owned(),
+        "--output".to_owned(),
+        "json".to_owned(),
+        "--config".to_owned(),
+        config,
+    ])
+    .await;
+    assert!(ok, "{stdout}");
+    let scan = parse_scan(&stdout);
+    // localhost may resolve to several loopback addresses; at least the one
+    // the fixture listens on must report open, never out-of-scope unknown.
+    let states: Vec<PortState> = scan
+        .hosts
+        .iter()
+        .flat_map(|host| host.ports.iter().map(|port| port.state))
+        .collect();
+    assert!(states.contains(&PortState::Open), "{stdout}");
+    assert!(
+        !scan
+            .hosts
+            .iter()
+            .flat_map(|host| host.ports.iter())
+            .any(|port| { port.state == PortState::Unknown && port.reason == "out_of_scope" }),
+        "{stdout}"
+    );
+}
+
+#[tokio::test]
 async fn terminal_and_json_agree() {
     let (current, max, arrivals) = lab_state();
     let lab = LabListener::start(current, max, arrivals).await;

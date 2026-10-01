@@ -17,9 +17,13 @@ pub struct ResolvedHost {
 
 /// Expand parsed targets to addresses. Hostname resolution happens after
 /// scope confirmation: it is the first network I/O in the program.
+///
+/// Every resolved address is authorized in the guard before returning, so the
+/// connects that follow pass `check_ip`. Without this, hostname scans would
+/// resolve and then refuse their own results.
 pub async fn resolve_targets(
     targets: &[ParsedTarget],
-    guard: &ScopeGuard,
+    guard: &mut ScopeGuard,
     max_hosts: usize,
 ) -> Result<Vec<ResolvedHost>, Error> {
     let mut out = Vec::new();
@@ -42,6 +46,7 @@ pub async fn resolve_targets(
                 match tokio::net::lookup_host((name.as_str(), 0)).await {
                     Ok(addrs) => {
                         for addr in addrs {
+                            guard.allow_ip(&addr.ip());
                             out.push(ResolvedHost {
                                 display: name.clone(),
                                 addr: Some(addr.ip()),
@@ -58,4 +63,37 @@ pub async fn resolve_targets(
         enforce_host_count(out.len(), max_hosts)?;
     }
     Ok(out)
+}
+
+/// Re-authorize previously resolved addresses (resume path, which reuses
+/// stored resolution instead of looking hostnames up again).
+pub fn authorize_resolved(guard: &mut ScopeGuard, resolved: &[ResolvedHost]) {
+    for host in resolved {
+        if let Some(ip) = host.addr {
+            guard.allow_ip(&ip);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resolved_hostnames_pass_the_guard() {
+        let targets = crate::safety::scope::parse_targets(&["localhost".to_owned()], true, 256)
+            .expect("parse");
+        let mut guard = ScopeGuard::from_targets(&targets);
+        let resolved = resolve_targets(&targets, &mut guard, 256)
+            .await
+            .expect("resolve");
+        assert!(!resolved.is_empty(), "localhost must resolve locally");
+        for host in &resolved {
+            let ip = host.addr.expect("localhost resolves to addresses");
+            assert!(
+                guard.check_ip(&ip).is_ok(),
+                "resolved {ip} must stay in scope"
+            );
+        }
+    }
 }
