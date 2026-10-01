@@ -1,6 +1,6 @@
 [package]
 name = "sentinelscan"
-version = "0.5.0"
+version = "1.0.0"
 edition = "2021"
 description = "Authorized-only network discovery and TCP port scanner"
 license = "MIT"
