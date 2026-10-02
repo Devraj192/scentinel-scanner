@@ -1,16 +1,20 @@
 [package]
 name = "sentinelscan"
-version = "1.0.1"
+version = "2.0.0"
 edition = "2021"
 description = "Authorized-only network discovery and TCP port scanner"
-license = "MIT"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Devraj192/sentinel-scanner"
+readme = "../../README.md"
+keywords = ["network", "scanner", "security", "tcp", "cli"]
+categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
 name = "sentinelscan"
 path = "src/main.rs"
 
 [dependencies]
-sentinelscan-core = { version = "1.0.1", path = "../sentinelscan-core" }
+sentinelscan-core = { version = "2.0.0", path = "../sentinelscan-core" }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -27,3 +31,29 @@ crossterm = "0.29.0"
 
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.10"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/sentinelscan-v{ version }-{ target }.tgz"
+pkg-fmt = "tgz"
+
+[package.metadata.deb]
+maintainer = "Devraj Pal <Devraj192@users.noreply.github.com>"
+copyright = "2026, Devraj Pal"
+license-file = ["../../../LICENSE-MIT", "../../../LICENSE-APACHE"]
+section = "net"
+priority = "optional"
+assets = [
+    ["../../target/x86_64-unknown-linux-musl/release/sentinelscan", "usr/bin/", "755"],
+    ["../../packaging/completions/sentinelscan.bash", "usr/share/bash-completion/completions/sentinelscan", "644"],
+    ["../../packaging/completions/sentinelscan.zsh", "usr/share/zsh/vendor-completions/_sentinelscan", "644"],
+    ["../../packaging/completions/sentinelscan.fish", "usr/share/fish/vendor_completions.d/sentinelscan.fish", "644"],
+    ["../../packaging/man/sentinelscan.1", "usr/share/man/man1/sentinelscan.1", "644"],
+]
+
+[package.metadata.generate-rpm]
+maintainer = "Devraj Pal <Devraj192@users.noreply.github.com>"
+assets = [
+    { source = "../../target/x86_64-unknown-linux-musl/release/sentinelscan", dest = "/usr/bin/sentinelscan", mode = "755" },
+    { source = "../../packaging/completions/sentinelscan.bash", dest = "/usr/share/bash-completion/completions/sentinelscan", mode = "644" },
+    { source = "../../packaging/man/sentinelscan.1", dest = "/usr/share/man/man1/sentinelscan.1", mode = "644" },
+]

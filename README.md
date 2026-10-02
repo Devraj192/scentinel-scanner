@@ -1,7 +1,7 @@
 # SentinelScan
 
 [![ci](https://github.com/Devraj192/sentinel-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/Devraj192/sentinel-scanner/actions/workflows/ci.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![license: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 A command-line TCP port scanner for networks you are allowed to test. It
 discovers live hosts, classifies port states honestly, identifies services
@@ -11,6 +11,18 @@ in local SQLite history for comparison.
 > **Authorized use only.** Run SentinelScan only against systems and networks
 > you own or have written permission to test. Every run prints this warning
 > with the exact scope and asks for confirmation before sending traffic.
+
+## Install
+
+```sh
+curl -LsSf https://github.com/Devraj192/sentinel-scanner/releases/download/v2.0.0/sentinelscan-installer.sh | sh
+```
+
+More ways in: `cargo install sentinelscan`, `cargo binstall sentinelscan`,
+`.deb` / `.rpm` from [releases](https://github.com/Devraj192/sentinel-scanner/releases),
+`docker run --rm --network host ghcr.io/devraj192/sentinel-scanner`,
+or build from source (`cargo build --release`). Every channel ships the
+warning above; installers verify SHA-256 checksums and never run a scan.
 
 ## Contents
 
@@ -375,4 +387,4 @@ every push and pull request.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).

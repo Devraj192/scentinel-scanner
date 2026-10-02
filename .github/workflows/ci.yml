@@ -22,6 +22,11 @@ jobs:
         run: "! grep -rEn 'TcpStream|UdpSocket|lookup_host|SocketAddr|TcpListener' crates/sentinelscan/src/tui/ crates/sentinelscan/src/hints.rs || exit 1"
       - run: cargo test --workspace
       - run: cargo build --workspace
+      - run: cargo install cargo-audit cargo-deny --locked
+      - run: cargo audit
+      - run: cargo deny check
+      - run: cargo publish --dry-run -p sentinelscan-core
+      - run: cargo publish --dry-run -p sentinelscan
 
   musl:
     # Static binaries for every distro: no system libraries required.

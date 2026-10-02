@@ -1,0 +1,22 @@
+# Dependency gates: advisories must be clean, licenses stay permissive-only,
+# duplicate versions are reported but non-fatal.
+[graph]
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+yanked = "warn"
+
+[licenses]
+# Verified against the real tree with `cargo deny check licenses`: every
+# other crate is MIT and/or Apache-2.0. The three below are permissive:
+# foldhash (Zlib), ryu (Apache-2.0 OR BSL-1.0), unicode-ident (Unicode tables).
+allow = ["MIT", "Apache-2.0", "Zlib", "BSL-1.0", "Unicode-3.0"]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
