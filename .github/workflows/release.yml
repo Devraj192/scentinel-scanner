@@ -107,12 +107,13 @@ jobs:
       - run: cargo build --release -p sentinelscan --target x86_64-unknown-linux-musl
       - run: cargo deb --target x86_64-unknown-linux-musl -p sentinelscan
       - run: cargo generate-rpm --target x86_64-unknown-linux-musl -p sentinelscan
+        working-directory: crates/sentinelscan
       - uses: actions/upload-artifact@v4
         with:
           name: packages
           path: |
-            target/x86_64-unknown-linux-musl/debian/*.deb
-            target/x86_64-unknown-linux-musl/generate-rpm/*.rpm
+            target/**/debian/*.deb
+            target/**/generate-rpm/*.rpm
 
   release:
     # Ships even if the registry publish is still waiting on its token:
