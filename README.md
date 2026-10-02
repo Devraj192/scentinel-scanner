@@ -1,6 +1,6 @@
 # SentinelScan
 
-[![ci](https://github.com/Devraj192/scentinel-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/Devraj192/scentinel-scanner/actions/workflows/ci.yml)
+[![ci](https://github.com/Devraj192/sentinel-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/Devraj192/sentinel-scanner/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A command-line TCP port scanner for networks you are allowed to test. It
