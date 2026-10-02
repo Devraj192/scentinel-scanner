@@ -119,11 +119,13 @@ impl Storage {
 
     /// Open (creating parents) at `path`, migrate, and lock down permissions.
     pub fn open(path: &Path) -> Result<Self, Error> {
+        let mut created_parent = false;
         if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     Error::Storage(format!("cannot create {}: {e}", parent.display()))
                 })?;
+                created_parent = true;
             }
         }
         let storage = Self {
@@ -131,7 +133,8 @@ impl Storage {
         };
         let conn = storage.connect()?;
         migrate(&conn)?;
-        restrict_permissions(path)?;
+        drop(conn);
+        restrict_permissions(path, created_parent)?;
         Ok(storage)
     }
 
@@ -784,16 +787,22 @@ fn column_missing(conn: &Connection, table: &str, column: &str) -> Result<bool, 
     Ok(found == 0)
 }
 
-/// Scan history maps someone's network, so it must not be world-readable.
-fn restrict_permissions(path: &Path) -> Result<(), Error> {
+/// Scan history maps someone's network, so the database file must not be
+/// readable by others. The containing directory is locked down only when we
+/// created it: an explicit `--db` inside a shared directory (like `/tmp`)
+/// must never change that directory's permissions.
+fn restrict_permissions(path: &Path, created_parent: bool) -> Result<(), Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
-                    |e| Error::Storage(format!("cannot lock down {}: {e}", parent.display())),
-                )?;
+        if created_parent {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                        .map_err(|e| {
+                            Error::Storage(format!("cannot lock down {}: {e}", parent.display()))
+                        })?;
+                }
             }
         }
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -802,7 +811,7 @@ fn restrict_permissions(path: &Path) -> Result<(), Error> {
     #[cfg(not(unix))]
     {
         // Windows has no POSIX mode bits; the file inherits the user's ACLs.
-        let _ = path;
+        let _ = (path, created_parent);
     }
     Ok(())
 }
@@ -1137,6 +1146,40 @@ mod tests {
                 .expect("relocate")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn locks_only_directories_it_creates() {
+        let base = std::env::temp_dir().join(format!(
+            "sentinelscan-perm-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        // Pre-existing directory: usable, but its own permissions stay ours to keep.
+        std::fs::create_dir_all(&base).expect("existing dir");
+        Storage::open(&base.join("history.db")).expect("open in existing dir");
+        // Fresh nested path: the created directory gets locked down (Unix).
+        Storage::open(&base.join("new/history.db")).expect("open in created dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let created = std::fs::metadata(base.join("new"))
+                .expect("meta")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(created, 0o700, "created dir locked down");
+            let file = std::fs::metadata(base.join("new/history.db"))
+                .expect("meta")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file, 0o600, "history file locked down");
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
