@@ -104,6 +104,11 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Filesystem path of the database file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Open the default history, relocating a v1 file with a backup first.
     pub fn open_default() -> Result<Self, Error> {
         if relocate_history(&legacy_db_path(), &default_db_path())?.is_some() {

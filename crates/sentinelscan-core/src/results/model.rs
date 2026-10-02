@@ -191,7 +191,7 @@ pub fn service_table(scan: &Scan) -> String {
             }
             let confidence = port
                 .confidence
-                .map(|confidence| format!("{confidence:.2}"))
+                .map(|confidence| format!("{confidence:.2} ({})", confidence_word(port.confidence)))
                 .unwrap_or_else(|| "-".to_owned());
             out.push_str(&format!(
                 "{}\t{}\t{}\t{}\t{}\n",
@@ -252,12 +252,116 @@ pub fn os_lines(scan: &Scan) -> String {
             continue;
         }
         out.push_str(&format!(
-            "os\t{}\t{}\t{}\t{:.2}\n",
+            "os\t{}\t{}\t{}\t{:.2} ({})\n",
             sanitize(&host.address),
             sanitize(&os.family),
             sanitize(os.version.as_deref().unwrap_or("-")),
             os.confidence,
+            confidence_word(Some(os.confidence)),
         ));
+    }
+    out
+}
+
+/// Confidence in words. Scores are detector-internal (0.0-1.0); words are for
+/// humans reading the terminal.
+pub fn confidence_word(confidence: Option<f32>) -> &'static str {
+    match confidence {
+        None => "-",
+        Some(score) if score >= 0.85 => "high",
+        Some(score) if score >= 0.6 => "medium",
+        Some(score) if score > 0.0 => "low",
+        _ => "unknown",
+    }
+}
+
+/// Plain-language meaning of a port state plus what to do next.
+/// `None` means the topic is not a state.
+pub fn explain_state(state: &str) -> Option<(&'static str, &'static str)> {
+    match state.to_lowercase().as_str() {
+        "open" => Some((
+            "Something accepted the connection: a service is listening here.",
+            "Identify the service and check whether it should be exposed.",
+        )),
+        "closed" => Some((
+            "The host answered and refused: nothing is listening on this port.",
+            "Nothing to do, unless you expected a service here — then check it is running.",
+        )),
+        "filtered" => Some((
+            "No answer came back: a firewall or network issue is likely hiding the port.",
+            "Retry from another vantage point, or check firewall rules with the network owner.",
+        )),
+        "unknown" => Some((
+            "The scanner could not tell, usually because of a local error such as permissions or exhausted resources.",
+            "Try again, lower --concurrency and --rate, or run sentinelscan doctor.",
+        )),
+        _ => None,
+    }
+}
+
+/// Plain-language meaning of the confidence words.
+pub fn explain_confidence() -> (&'static str, &'static str) {
+    (
+        "high means the detector saw its exact signature (e.g. an SSH banner); \
+         medium means a strong hint (e.g. a Server header); low means a weak hint; \
+         unknown means the detector declined to guess.",
+        "Read the evidence list in JSON output to see exactly what was observed.",
+    )
+}
+
+/// Short end-of-scan summary: hosts up, open ports, notable findings, anything
+/// undetermined, and where results were saved. Plain sentences, no jargon.
+pub fn summary(scan: &Scan, saved_to: Option<&str>) -> String {
+    let up = scan
+        .hosts
+        .iter()
+        .filter(|host| host.status == HostStatus::Up)
+        .count();
+    let mut open: Vec<String> = Vec::new();
+    let mut undetermined = 0;
+    for host in &scan.hosts {
+        for port in &host.ports {
+            if port.state == PortState::Open {
+                let service = port.service.as_deref().unwrap_or("unknown service");
+                open.push(format!("{}:{} ({})", host.address, port.port, service));
+            } else if port.state == PortState::Unknown {
+                undetermined += 1;
+            }
+        }
+    }
+    let mut out = format!(
+        "Scan {}: {} host(s) up, {} open port(s).\n",
+        scan.meta.scan_id,
+        up,
+        open.len()
+    );
+    if open.is_empty() {
+        out.push_str("Notable findings: none; no open ports.\n");
+    } else {
+        out.push_str("Notable findings:\n");
+        for finding in open.iter().take(5) {
+            out.push_str(&format!("  {finding}\n"));
+        }
+        if open.len() > 5 {
+            out.push_str(&format!(
+                "  ...and {} more (see full output)\n",
+                open.len() - 5
+            ));
+        }
+    }
+    if undetermined > 0 {
+        out.push_str(&format!(
+            "Could not determine {undetermined} port(s) (unknown); retry, lower the rate, or run sentinelscan doctor.\n"
+        ));
+    }
+    if scan.meta.truncated {
+        out.push_str(&format!(
+            "Stopped early; resume with: sentinelscan scan --resume {} --yes\n",
+            scan.meta.scan_id
+        ));
+    }
+    if let Some(path) = saved_to {
+        out.push_str(&format!("Results saved to {path}.\n"));
     }
     out
 }
@@ -381,6 +485,51 @@ mod tests {
         ] {
             assert!(!view.contains('\u{1b}'), "ANSI escape in output");
         }
+    }
+
+    #[test]
+    fn confidence_words_match_bands() {
+        assert_eq!(confidence_word(None), "-");
+        assert_eq!(confidence_word(Some(0.95)), "high");
+        assert_eq!(confidence_word(Some(0.6)), "medium");
+        assert_eq!(confidence_word(Some(0.1)), "low");
+        assert_eq!(confidence_word(Some(0.0)), "unknown");
+    }
+
+    #[test]
+    fn every_state_explains_itself() {
+        for state in ["open", "closed", "filtered", "unknown", "OPEN"] {
+            let (meaning, next) = explain_state(state).expect("every state explained");
+            assert!(!meaning.is_empty() && !next.is_empty());
+        }
+        assert_eq!(explain_state("banana"), None);
+    }
+
+    #[test]
+    fn summary_counts_and_names_next_steps() {
+        let mut scan = Scan::start("01TEST".to_owned(), vec!["127.0.0.1".to_owned()]);
+        scan.hosts.push(HostResult {
+            address: "127.0.0.1".to_owned(),
+            status: HostStatus::Up,
+            latency_ms: 1,
+            ports: vec![PortResult {
+                port: 80,
+                protocol: "tcp".to_owned(),
+                state: PortState::Open,
+                reason: "handshake".to_owned(),
+                latency_ms: 1,
+                service: Some("http".to_owned()),
+                version: None,
+                confidence: Some(0.9),
+                evidence: Vec::new(),
+                banner: None,
+            }],
+            os: None,
+        });
+        let text = summary(&scan, Some("/tmp/history.db"));
+        assert!(text.contains("1 host(s) up, 1 open port(s)"));
+        assert!(text.contains("127.0.0.1:80 (http)"));
+        assert!(text.contains("/tmp/history.db"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -7,7 +7,9 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use tokio::sync::{mpsc, Semaphore};
 
-use super::args::{Command, HistoryArgs, ScanArgs, TargetArg};
+use super::args::{
+    Cli, Command, CompletionsArgs, ExplainArgs, HistoryArgs, InitArgs, ScanArgs, TargetArg,
+};
 use crate::doctor::{run as run_doctor, Status};
 use sentinelscan_core::config::profiles::Profile;
 use sentinelscan_core::config::{Config, Limits};
@@ -317,16 +319,24 @@ async fn run_bounded(prepared: PreparedScan, resume: Option<StoredScan>) -> anyh
     }
 }
 
-fn emit(scan: &Scan, output: &str) {
+fn emit(scan: &Scan, output: &str, saved_to: Option<&str>) {
+    let summary = model::summary(scan, saved_to);
     match output {
-        "json" => println!("{}", model::to_json(scan)),
-        "csv" => print!("{}", model::to_csv(scan)),
+        "json" => {
+            println!("{}", model::to_json(scan));
+            eprintln!("{summary}");
+        }
+        "csv" => {
+            print!("{}", model::to_csv(scan));
+            eprintln!("{summary}");
+        }
         _ => {
             print!("{}", model::terminal_table(scan));
             print!("{}", model::os_lines(scan));
             if scan.meta.truncated {
                 println!("Note: scan stopped early; results are partial.");
             }
+            print!("{summary}");
         }
     }
 }
@@ -346,13 +356,119 @@ fn maybe_finish(storage: &Storage, scan: &Scan) -> anyhow::Result<()> {
         .map_err(|e| anyhow!("{e}"))
 }
 
+/// Ask one question on stderr, read one line from stdin.
+fn prompt(label: &str) -> anyhow::Result<String> {
+    eprint!("{label}");
+    io::stdout().flush().context("flush prompt")?;
+    let stdin = io::stdin();
+    let line = stdin
+        .lock()
+        .lines()
+        .next()
+        .transpose()
+        .context("read answer")?
+        .unwrap_or_default();
+    Ok(line.trim().to_owned())
+}
+
+/// Guided setup for `scan` with no target. TTY only: scripts must pass
+/// explicit flags, exactly as in v1. Returns false when the user aborts.
+fn wizard(args: &mut ScanArgs) -> anyhow::Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    eprintln!("No target given: guided setup. Empty answers abort.");
+    let target = prompt("Target (IP, CIDR, or hostname): ")?;
+    if target.is_empty() {
+        return Ok(false);
+    }
+    if target.chars().any(|c| c.is_alphabetic()) && !target.contains(':') {
+        eprintln!("Hostname detected: enabling --allow-hostnames for this run.");
+        args.allow_hostnames = true;
+    }
+    args.targets = vec![target];
+    let ports = prompt("Ports [standard] (try 22, 80,443, 1-1024, quick, standard, full): ")?;
+    if !ports.is_empty() {
+        args.ports = Some(ports);
+    }
+    Ok(true)
+}
+
+/// Marker file proving the authorized-use notice was acknowledged once.
+fn ack_path() -> std::path::PathBuf {
+    sentinelscan_core::paths::config_home()
+        .map(|home| home.join("sentinelscan/acknowledged"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".sentinelscan/acknowledged"))
+}
+
+/// One-time authorized-use acknowledgement. TTY runs ask; scripts acknowledge
+/// with `--yes`, which they already pass for the scope prompt.
+fn ensure_acknowledged(yes: bool) -> anyhow::Result<()> {
+    let path = ack_path();
+    ensure_acknowledged_at(
+        &path,
+        yes,
+        std::io::stdin().is_terminal(),
+        &mut std::io::stdin().lock(),
+    )
+}
+
+fn ensure_acknowledged_at(
+    path: &std::path::Path,
+    yes: bool,
+    tty: bool,
+    stdin: &mut dyn BufRead,
+) -> anyhow::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    eprintln!(
+        "First run: SentinelScan may only test systems and networks you own or have written permission to test."
+    );
+    if tty {
+        eprint!("Type 'yes' to agree (one-time): ");
+        io::stdout().flush().context("flush prompt")?;
+        let line = stdin
+            .lines()
+            .next()
+            .transpose()
+            .context("read answer")?
+            .unwrap_or_default();
+        if line.trim().to_lowercase() != "yes" {
+            return Err(anyhow!("declined: scan only authorized targets"));
+        }
+    } else if !yes {
+        return Err(anyhow!(
+            "first run requires acknowledgement: re-run with --yes after reading the authorized-use notice"
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
+        }
+    }
+    std::fs::write(path, "acknowledged\n")
+        .map_err(|e| anyhow!("cannot record acknowledgement: {e}"))?;
+    Ok(())
+}
+
 /// Run the `scan` subcommand end to end.
 pub async fn run_scan(args: &ScanArgs) -> anyhow::Result<()> {
-    if let Some(resume_id) = &args.resume {
-        return run_resume(args, resume_id).await;
+    ensure_acknowledged(args.yes)?;
+    let mut args = args.clone();
+    if let Some(resume_id) = args.resume.clone() {
+        return run_resume(&args, &resume_id).await;
     }
     if args.targets.is_empty() {
-        return Err(anyhow!("no targets given"));
+        if std::io::stdin().is_terminal() {
+            if !wizard(&mut args)? {
+                println!("Aborted. No traffic sent.");
+                return Ok(());
+            }
+        } else {
+            return Err(anyhow!("no targets given"));
+        }
     }
     let Some(prepared) = prepare(&PrepareRequest {
         raw_targets: args.targets.clone(),
@@ -376,7 +492,7 @@ pub async fn run_scan(args: &ScanArgs) -> anyhow::Result<()> {
     let storage = prepared.storage.clone();
     let scan = run_bounded(prepared, None).await?;
     maybe_finish(&storage, &scan)?;
-    emit(&scan, &args.output);
+    emit(&scan, &args.output, Some(&storage.path().to_string_lossy()));
     Ok(())
 }
 
@@ -442,7 +558,7 @@ async fn run_resume(args: &ScanArgs, resume_id: &str) -> anyhow::Result<()> {
     let storage = prepared.storage.clone();
     let scan = run_bounded(prepared, Some(stored)).await?;
     maybe_finish(&storage, &scan)?;
-    emit(&scan, &args.output);
+    emit(&scan, &args.output, Some(&storage.path().to_string_lossy()));
     Ok(())
 }
 
@@ -457,6 +573,7 @@ enum TargetMode {
 }
 
 async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result<()> {
+    ensure_acknowledged(arg.yes)?;
     let Some(prepared) = prepare(&PrepareRequest {
         raw_targets: std::slice::from_ref(&arg.target).to_vec(),
         allow_hostnames: arg.allow_hostnames,
@@ -508,8 +625,12 @@ async fn run_target_command(arg: &TargetArg, mode: TargetMode) -> anyhow::Result
     if matches!(mode, TargetMode::Services) {
         print!("{}", model::service_table(&scan));
         print!("{}", model::os_lines(&scan));
+        eprint!(
+            "{}",
+            model::summary(&scan, Some(&storage.path().to_string_lossy()))
+        );
     } else {
-        emit(&scan, "terminal");
+        emit(&scan, "terminal", Some(&storage.path().to_string_lossy()));
     }
     Ok(())
 }
@@ -602,7 +723,117 @@ pub async fn run(command: &Command) -> anyhow::Result<()> {
         Command::Compare(args) => {
             run_compare(&args.scan_a, &args.scan_b, &args.db, &args.output).await
         }
+        Command::Explain(args) => run_explain(args),
+        Command::Init(args) => run_init(args),
+        Command::Completions(args) => run_completions(args),
+        Command::Man => run_man(),
     }
+}
+
+/// Explain a port state or the confidence words in plain language.
+fn run_explain(args: &ExplainArgs) -> anyhow::Result<()> {
+    let topic = &args.topic;
+    if topic.eq_ignore_ascii_case("confidence") {
+        let (meaning, next) = model::explain_confidence();
+        println!("confidence: {meaning}\nNext: {next}");
+        return Ok(());
+    }
+    match model::explain_state(topic) {
+        Some((meaning, next)) => {
+            println!("{}: {meaning}\nNext: {next}", topic.to_lowercase());
+            Ok(())
+        }
+        None => Err(anyhow!(
+            "unknown topic '{topic}': try open, closed, filtered, unknown, or confidence"
+        )),
+    }
+}
+
+/// Default config file content, every field commented.
+const DEFAULT_CONFIG: &str = r#"# SentinelScan configuration. Every field is optional; missing fields
+# fall back to the built-in conservative defaults.
+[limits]
+#max_hosts = 256
+#max_ports = 1024
+#max_concurrency = 50
+#max_rate = 500
+#connect_timeout_ms = 3000
+#probe_timeout_ms = 2000
+#max_banner_size = 4096
+#max_scan_duration_secs = 300
+
+#[profiles.quick]
+#ports = "quick"
+#service_detection = false
+
+#[profiles.standard]
+#service_detection = true
+
+#[profiles.custom]
+#ports = "22,80,443"
+"#;
+
+/// Write the default config file to the XDG config directory. Refuses to
+/// overwrite without `--force`.
+fn run_init(args: &InitArgs) -> anyhow::Result<()> {
+    let Some(dir) = sentinelscan_core::paths::config_home() else {
+        return Err(anyhow!("cannot locate a config directory on this platform"));
+    };
+    let path = dir.join("sentinelscan/config.toml");
+    write_init_config(&path, args.force)?;
+    println!("Wrote {}", path.display());
+    Ok(())
+}
+
+fn write_init_config(path: &std::path::Path, force: bool) -> anyhow::Result<()> {
+    if path.exists() && !force {
+        return Err(anyhow!(
+            "config file already exists at {}: edit it in place or re-run with --force",
+            path.display()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, DEFAULT_CONFIG)
+        .map_err(|e| anyhow!("cannot write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Print shell completions for bash, zsh, or fish.
+fn run_completions(args: &CompletionsArgs) -> anyhow::Result<()> {
+    use clap::CommandFactory as _;
+    let shell = match args.shell.to_lowercase().as_str() {
+        "bash" => clap_complete::Shell::Bash,
+        "zsh" => clap_complete::Shell::Zsh,
+        "fish" => clap_complete::Shell::Fish,
+        _ => {
+            return Err(anyhow!(
+                "unknown shell '{}': try bash, zsh, or fish",
+                args.shell
+            ));
+        }
+    };
+    let mut command = Cli::command();
+    clap_complete::generate(shell, &mut command, "sentinelscan", &mut std::io::stdout());
+    Ok(())
+}
+
+/// Print the man page in roff format.
+fn run_man() -> anyhow::Result<()> {
+    print!("{}", man_page()?);
+    Ok(())
+}
+
+fn man_page() -> anyhow::Result<String> {
+    use clap::CommandFactory as _;
+    let command = Cli::command();
+    let man = clap_mangen::Man::new(command);
+    let mut roff = Vec::new();
+    man.render(&mut roff)
+        .map_err(|e| anyhow!("cannot render man page: {e}"))?;
+    String::from_utf8(roff).map_err(|e| anyhow!("man page is not UTF-8: {e}"))
 }
 
 #[cfg(test)]
@@ -669,5 +900,116 @@ mod tests {
             .await
             .expect("resolve");
         assert_eq!(resolved.len(), 2);
+    }
+
+    fn temp_ack_path(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("sentinelscan-ack-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir.join("acknowledged")
+    }
+
+    #[test]
+    fn ack_matrix() {
+        // Existing marker: always fine, never prompts.
+        let path = temp_ack_path("exists");
+        std::fs::write(&path, "acknowledged\n").expect("marker");
+        let empty: &[u8] = b"";
+        assert!(ensure_acknowledged_at(&path, false, false, &mut &empty[..]).is_ok());
+        assert!(ensure_acknowledged_at(&path, false, true, &mut &empty[..]).is_ok());
+
+        // Missing marker, automation: --yes writes it, otherwise a clear error.
+        let path = temp_ack_path("auto");
+        assert!(ensure_acknowledged_at(&path, true, false, &mut &empty[..]).is_ok());
+        assert!(path.exists());
+        let path = temp_ack_path("auto-deny");
+        assert!(ensure_acknowledged_at(&path, false, false, &mut &empty[..]).is_err());
+
+        // Missing marker, TTY: "yes" writes it, anything else declines.
+        let path = temp_ack_path("tty-yes");
+        assert!(ensure_acknowledged_at(&path, false, true, &mut &b"yes\n"[..]).is_ok());
+        assert!(path.exists());
+        let path = temp_ack_path("tty-no");
+        assert!(ensure_acknowledged_at(&path, false, true, &mut &b"no\n"[..]).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn wizard_declines_without_a_tty() {
+        // Test stdin is piped, so the wizard must refuse rather than block.
+        let mut args = scan_args(&[], "80");
+        assert!(!wizard(&mut args).expect("no block"));
+        assert!(args.targets.is_empty());
+    }
+
+    #[test]
+    fn init_writes_refuses_overwrites() {
+        let dir = std::env::temp_dir().join(format!("sentinelscan-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config.toml");
+        write_init_config(&path, false).expect("write");
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert!(content.contains("max_concurrency"));
+        assert!(write_init_config(&path, false).is_err());
+        write_init_config(&path, true).expect("force overwrites");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explain_covers_every_state() {
+        for topic in [
+            "open",
+            "closed",
+            "filtered",
+            "unknown",
+            "confidence",
+            "FILTERED",
+        ] {
+            let args = ExplainArgs {
+                topic: topic.to_owned(),
+            };
+            assert!(run_explain(&args).is_ok(), "{topic}");
+        }
+        assert!(run_explain(&ExplainArgs {
+            topic: "banana".to_owned()
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn completions_reject_unknown_shells() {
+        for shell in ["bash", "zsh", "fish"] {
+            assert!(
+                run_completions(&CompletionsArgs {
+                    shell: shell.to_owned()
+                })
+                .is_ok(),
+                "{shell}"
+            );
+        }
+        assert!(run_completions(&CompletionsArgs {
+            shell: "powershell".to_owned()
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn man_page_mentions_every_command() {
+        let page = man_page().expect("render");
+        for command in [
+            "scan",
+            "hosts",
+            "ports",
+            "services",
+            "history",
+            "compare",
+            "doctor",
+            "explain",
+            "init",
+            "completions",
+        ] {
+            assert!(page.contains(command), "{command} missing from man page");
+        }
     }
 }

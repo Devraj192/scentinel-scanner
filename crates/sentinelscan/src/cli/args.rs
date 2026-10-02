@@ -19,25 +19,74 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Validate scope and (in later phases) run a scan. Phase 1 stops after confirmation.
+    /// Run a scan: confirm scope, discover hosts, probe ports, detect services.
+    ///
+    /// Examples:
+    ///   sentinelscan scan 127.0.0.1 --ports 22,80,443 --yes
+    ///   sentinelscan scan 192.168.1.0/24 --ports 1-1024 --output json --yes
+    ///   sentinelscan scan --resume 01HEXAMPLE --yes
     Scan(ScanArgs),
-    /// List live hosts (Phase 2).
+    /// List live hosts.
+    ///
+    /// Examples:
+    ///   sentinelscan hosts 127.0.0.1 --yes
     Hosts(TargetArg),
-    /// Scan ports (Phase 2).
+    /// Scan ports without service detection.
+    ///
+    /// Examples:
+    ///   sentinelscan ports 127.0.0.1 --yes
     Ports(TargetArg),
-    /// Detect services (Phase 3).
+    /// Scan ports and identify services.
+    ///
+    /// Examples:
+    ///   sentinelscan services 127.0.0.1 --yes
     Services(TargetArg),
     /// Show scan history.
+    ///
+    /// Examples:
+    ///   sentinelscan history
+    ///   sentinelscan history --output json --db /tmp/lab.db
     History(HistoryArgs),
-    /// Compare two scans.
+    /// Compare two scans: added, removed, and changed ports and services.
+    ///
+    /// Examples:
+    ///   sentinelscan compare 01SCAN_A 01SCAN_B
     Compare(CompareArgs),
     /// Check the environment: limits, privileges, DNS, directories, install.
+    ///
+    /// Examples:
+    ///   sentinelscan doctor
     Doctor(DoctorArgs),
+    /// Explain a port state or confidence word in plain language.
+    ///
+    /// Examples:
+    ///   sentinelscan explain filtered
+    ///   sentinelscan explain confidence
+    Explain(ExplainArgs),
+    /// Write a commented default config file to the XDG config directory.
+    ///
+    /// Examples:
+    ///   sentinelscan init
+    Init(InitArgs),
+    /// Print shell completions.
+    ///
+    /// Examples:
+    ///   sentinelscan completions bash >> ~/.bash_completion
+    Completions(CompletionsArgs),
+    /// Print the man page (roff).
+    ///
+    /// Examples:
+    ///   sentinelscan man | man -l -
+    Man,
     /// Show effective configuration.
+    ///
+    /// Examples:
+    ///   sentinelscan config
+    ///   sentinelscan config --config mylimits.toml
     Config(ConfigArgs),
 }
 
-/// Full `scan` arguments; every flag from PRD 3.10 parses in Phase 1.
+/// Full `scan` arguments.
 #[derive(Debug, Clone, Parser)]
 pub struct ScanArgs {
     /// Targets: IPv4, IPv6, CIDR, or hostname (hostnames need --allow-hostnames).
@@ -55,19 +104,19 @@ pub struct ScanArgs {
     /// New operations per second (overrides config).
     #[arg(long)]
     pub rate: Option<u64>,
-    /// Enable service detection (Phase 3).
+    /// Enable service detection.
     #[arg(long, default_value_t = false)]
     pub service_detection: bool,
-    /// Enable banner grabbing (Phase 3).
+    /// Enable banner grabbing.
     #[arg(long, default_value_t = false)]
     pub banner: bool,
-    /// Enable OS detection (Phase 5).
+    /// Enable OS detection.
     #[arg(long, default_value_t = false)]
     pub os_detection: bool,
     /// Output format.
     #[arg(long, default_value = "terminal")]
     pub output: String,
-    /// Skip host discovery (Phase 2).
+    /// Skip host discovery.
     #[arg(long, default_value_t = false)]
     pub skip_host_discovery: bool,
     /// Allow hostname targets (off by default).
@@ -127,6 +176,25 @@ pub struct DoctorArgs {
     /// Output format (terminal or json).
     #[arg(long, default_value = "terminal")]
     pub output: String,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct ExplainArgs {
+    /// Topic: open, closed, filtered, unknown, or confidence.
+    pub topic: String,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct InitArgs {
+    /// Overwrite an existing config file.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct CompletionsArgs {
+    /// Shell: bash, zsh, or fish.
+    pub shell: String,
 }
 
 #[derive(Debug, Clone, Parser)]

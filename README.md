@@ -74,13 +74,22 @@ sentinelscan scan <target> [--ports 1-1024] [--profile quick|standard|custom]
                            [--output terminal|json|csv]
                            [--skip-host-discovery] [--allow-hostnames]
                            [--config FILE] [--db FILE] [--resume SCAN_ID] [--yes]
-sentinelscan hosts <target> [--allow-hostnames] [--yes]
-sentinelscan ports <target> [--allow-hostnames] [--yes]
-sentinelscan services <target> [--allow-hostnames] [--yes]
-sentinelscan history [--db FILE] [--output terminal|json]
-sentinelscan compare <scan_a> <scan_b> [--db FILE] [--output terminal|json]
+sentinelscan hosts <target>
+sentinelscan ports <target>
+sentinelscan services <target>
+sentinelscan history [--output terminal|json]
+sentinelscan compare <scan_a> <scan_b> [--output terminal|json]
+sentinelscan doctor [--output terminal|json]
+sentinelscan explain <open|closed|filtered|unknown|confidence>
+sentinelscan init [--force]
+sentinelscan completions <bash|zsh|fish>
+sentinelscan man
 sentinelscan config [--config FILE]
 ```
+
+First run asks for a one-time authorized-use acknowledgement (scripts use
+`--yes`); `scan` with no target starts a guided setup on a terminal, while
+scripts must always pass explicit flags.
 
 - `scan` — full pipeline: scope confirmation, host discovery, port scan,
   service detection, OS estimate, stored to history.
@@ -94,6 +103,11 @@ sentinelscan config [--config FILE]
 - `doctor` — check file-descriptor limits, privileges, DNS, directory
   permissions, and install method. Prints pass/warn/fail with fixes and
   changes nothing.
+- `explain` — plain-language meaning of a port state or confidence word,
+  plus what to do next.
+- `init` — write a commented default config to the XDG config directory.
+- `completions` — shell completions for bash, zsh, fish.
+- `man` — the man page in roff format (`sentinelscan man | man -l -).
 
 Targets accept IPv4, IPv6, CIDR ranges, and multiple values
 (`scan 127.0.0.1 10.0.0.0/30 --ports 22,80-85,443`). Hostnames are rejected
@@ -231,8 +245,9 @@ never persisted).
 
 ## Configuration
 
-`--config` points at a TOML file. Every field is optional; missing fields
-fall back to the defaults.
+`sentinelscan init` writes a commented default file to the XDG config
+directory (refuses to overwrite without `--force`). `--config` points at a
+TOML file. Every field is optional; missing fields fall back to the defaults.
 
 ```toml
 [limits]
@@ -263,8 +278,9 @@ automatically when `--config` is absent.
 ## Output formats
 
 - `terminal` (default): `HOST / PORT / STATE / SERVICE` table, plus `os`
-  lines when an OS guess was decided. Control characters are stripped before
-  printing, so hostile banners cannot corrupt the terminal.
+  lines when an OS guess was decided, ending with a plain-language summary
+  (hosts up, open ports, findings, save location). Control characters are
+  stripped before printing, so hostile banners cannot corrupt the terminal.
 - `json`: the canonical result model, pretty-printed.
 - `csv`: one row per scanned port, RFC 4180 quoting.
 

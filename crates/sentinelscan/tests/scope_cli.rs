@@ -76,6 +76,39 @@ fn doctor_reports_without_changing_anything() {
 }
 
 #[test]
+fn explain_states_in_plain_language() {
+    let output = Command::new(binary())
+        .args(["explain", "filtered"])
+        .output()
+        .expect("run binary");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("firewall"), "{stdout}");
+    let output = Command::new(binary())
+        .args(["explain", "banana"])
+        .output()
+        .expect("run binary");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn completions_and_man_render() {
+    let output = Command::new(binary())
+        .args(["completions", "bash"])
+        .output()
+        .expect("run binary");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("sentinelscan"));
+    let output = Command::new(binary())
+        .args(["man"])
+        .output()
+        .expect("run binary");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(".TH sentinelscan"), "{stdout:.200}");
+}
+
+#[test]
 fn scan_enforces_max_ports() {
     let output = Command::new(binary())
         .args(["scan", "127.0.0.1", "--ports", "1-1025", "--yes"])
