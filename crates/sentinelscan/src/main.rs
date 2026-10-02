@@ -1,6 +1,9 @@
 use clap::Parser;
-use sentinelscan::cli::args::Cli;
-use sentinelscan::cli::commands::run;
+
+mod cli;
+
+use crate::cli::args::Cli;
+use crate::cli::commands::run;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

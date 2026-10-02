@@ -86,6 +86,10 @@ pub struct HostResult {
 pub struct ScanMeta {
     pub scan_id: String,
     pub version: String,
+    /// JSON schema version. Additive only: version 1 payloads (without this
+    /// field) still parse, defaulting to the current version.
+    #[serde(default = "current_schema_version")]
+    pub schema_version: u32,
     pub started_unix_secs: u64,
     pub finished_unix_secs: u64,
     pub truncated: bool,
@@ -109,6 +113,12 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Current JSON schema version, used for new scans and as the default when
+/// reading payloads that predate the field.
+pub fn current_schema_version() -> u32 {
+    2
+}
+
 impl Scan {
     /// New scan with `finished` unset (0) and `truncated` false.
     pub fn start(scan_id: String, targets: Vec<String>) -> Self {
@@ -116,6 +126,7 @@ impl Scan {
             meta: ScanMeta {
                 scan_id,
                 version: env!("CARGO_PKG_VERSION").to_owned(),
+                schema_version: current_schema_version(),
                 started_unix_secs: unix_now(),
                 finished_unix_secs: 0,
                 truncated: false,
@@ -326,6 +337,15 @@ mod tests {
         let csv = to_csv(&scan);
         assert!(csv.contains("\"a,b\""));
         assert!(csv.contains("\"x\"\"y\""));
+    }
+
+    #[test]
+    fn v1_payloads_parse_with_current_schema() {
+        let v1 = r#"{"scan_id":"01V1","version":"1.0.1","started_unix_secs":1,
+            "finished_unix_secs":2,"truncated":false,"peak_active_probes":0}"#;
+        let meta: ScanMeta =
+            serde_json::from_str(&v1.lines().collect::<String>()).expect("v1 parses");
+        assert_eq!(meta.schema_version, current_schema_version());
     }
 
     #[test]

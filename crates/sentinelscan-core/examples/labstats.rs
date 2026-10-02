@@ -4,10 +4,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sentinelscan::config::Limits;
-use sentinelscan::safety::scope::{parse_targets, ScopeGuard};
-use sentinelscan::scanner::rate_limit::RateLimiter;
-use sentinelscan::scanner::scheduler::scan_ports;
+use sentinelscan_core::config::Limits;
+use sentinelscan_core::safety::scope::{parse_targets, ScopeGuard};
+use sentinelscan_core::scanner::rate_limit::RateLimiter;
+use sentinelscan_core::scanner::scheduler::scan_ports;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
@@ -77,7 +77,7 @@ async fn main() {
     let rate = Arc::new(RateLimiter::new(limits.max_rate));
     let ips = vec!["127.0.0.1".parse().expect("ip"); 8];
     let start = Instant::now();
-    let (hosts, _) = sentinelscan::discovery::host::discover_all(
+    let (hosts, _) = sentinelscan_core::discovery::host::discover_all(
         &ips,
         &ports[..1],
         &limits,

@@ -4,9 +4,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use sentinelscan::results::model::{PortState, Scan};
-use sentinelscan::scanner::resolve::ResolvedHost;
-use sentinelscan::storage::{Comparison, ScanSummary, Storage};
+use sentinelscan_core::results::model::{PortState, Scan};
+use sentinelscan_core::scanner::resolve::ResolvedHost;
+use sentinelscan_core::storage::{Comparison, ScanSummary, Storage};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 

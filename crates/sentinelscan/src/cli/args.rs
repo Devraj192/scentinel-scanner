@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-use crate::config::profiles::Profile;
+use sentinelscan_core::config::profiles::Profile;
 
 const AUTH_WARNING: &str =
     "Authorized use only: scan only systems and networks you own or have written permission to test.";

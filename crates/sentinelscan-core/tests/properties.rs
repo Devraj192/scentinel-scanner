@@ -1,7 +1,7 @@
 use proptest::prelude::*;
-use sentinelscan::detection::service::{sniff_version, Detection};
-use sentinelscan::results::model::sanitize;
-use sentinelscan::safety::ports::parse_ports;
+use sentinelscan_core::detection::service::{sniff_version, Detection};
+use sentinelscan_core::results::model::sanitize;
+use sentinelscan_core::safety::ports::parse_ports;
 
 /// Any mix of text, controls, and high bytes.
 fn hostile_text() -> impl Strategy<Value = String> {

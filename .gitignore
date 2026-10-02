@@ -2,7 +2,7 @@
 /target/
 
 # Proptest regression cache (local fuzz corpus)
-/tests/*.proptest-regressions
+*.proptest-regressions
 
 # Local scan history (created by runs without --db)
 /.sentinelscan/

@@ -1,12 +1,12 @@
-use sentinelscan::detection::service::{sniff_version, Evidence};
-use sentinelscan::os::fingerprint;
-use sentinelscan::results::model::{
+use sentinelscan_core::detection::service::{sniff_version, Evidence};
+use sentinelscan_core::os::fingerprint;
+use sentinelscan_core::results::model::{
     host_table, os_lines, service_table, terminal_table, to_csv, Banner, HostResult, HostStatus,
     PortResult, PortState, Scan,
 };
-use sentinelscan::safety::ports::parse_ports;
-use sentinelscan::safety::scope::{parse_single_target, parse_targets};
-use sentinelscan::storage::compare;
+use sentinelscan_core::safety::ports::parse_ports;
+use sentinelscan_core::safety::scope::{parse_single_target, parse_targets};
+use sentinelscan_core::storage::compare;
 
 /// Deterministic xorshift64: reproducible adversarial inputs, no new crates.
 struct Rng(u64);
@@ -71,7 +71,7 @@ fn has_bare_control(text: &str) -> bool {
 
 #[test]
 fn parsers_reject_garbage_with_typed_errors() {
-    use sentinelscan::Error;
+    use sentinelscan_core::Error;
 
     let mut rng = Rng(0xC0FFEE);
     let seeds: &[&[u8]] = &[
@@ -155,7 +155,7 @@ fn parsers_reject_garbage_with_typed_errors() {
 #[test]
 fn detectors_never_panic_and_stay_in_bounds() {
     let mut rng = Rng(0xDE7EC7);
-    let detectors = sentinelscan::detection::all();
+    let detectors = sentinelscan_core::detection::all();
     for _ in 0..2000 {
         let banner = if rng.below(2) == 0 {
             rng.bytes(256)

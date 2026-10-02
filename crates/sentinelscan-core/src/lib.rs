@@ -1,31 +1,35 @@
-//! SentinelScan: fast, safety-conscious network scanning for authorized networks.
+//! SentinelScan engine: fast, safety-conscious network scanning for authorized
+//! networks, as a library.
 //!
-//! The binary in `src/main.rs` is a thin CLI over this library. Future front
-//! ends (desktop app, dashboard, CI job) reuse the same pieces:
+//! The `sentinelscan` binary is a thin CLI over this library, and the v2 TUI
+//! is a second consumer of the same [`events`] stream. Reusable pieces:
 //! - [`config`]: limits, profiles, TOML loading.
 //! - [`safety`]: target/port parsing plus [`safety::scope::ScopeGuard`], the
 //!   only path to the network.
 //! - [`scanner`] and [`discovery`]: bounded async TCP probing.
 //! - [`detection`] and [`protocols`]: pluggable service identification.
 //! - [`os`]: banner-only OS estimates with evidence.
+//! - [`pipeline`]: staged runs emitting [`events::ScanEvent`].
 //! - [`results`]: one canonical model with terminal, JSON, and CSV views.
 //! - [`storage`]: SQLite history, comparison, and resumable scans.
 //!
 //! # Example
 //!
 //! ```no_run
-//! use sentinelscan::config::Config;
+//! use sentinelscan_core::config::Config;
 //!
 //! let config = Config::load(None).expect("defaults always validate");
 //! assert_eq!(config.limits.max_hosts, 256);
 //! ```
 
-pub mod cli;
 pub mod config;
 pub mod detection;
 pub mod discovery;
 pub mod errors;
+pub mod events;
 pub mod os;
+pub mod paths;
+pub mod pipeline;
 pub mod protocols;
 pub mod results;
 pub mod safety;

@@ -9,8 +9,16 @@ use crate::os::OsGuess;
 use crate::results::model::{Banner, HostResult, HostStatus, PortResult, PortState, Scan};
 use crate::scanner::resolve::ResolvedHost;
 
-/// Default history location: a local directory the user owns.
+/// Default history location: the XDG data dir when resolvable, otherwise the
+/// legacy working-directory path (which keeps Windows dev setups working).
 pub fn default_db_path() -> PathBuf {
+    crate::paths::data_home()
+        .map(|home| home.join("sentinelscan/history.db"))
+        .unwrap_or_else(legacy_db_path)
+}
+
+/// Where v1 kept history: always the working directory.
+pub fn legacy_db_path() -> PathBuf {
     PathBuf::from(".sentinelscan/history.db")
 }
 
@@ -90,11 +98,20 @@ pub struct ScanSummary {
 
 /// Local SQLite history. Each call opens its own connection, so no connection
 /// is ever shared across threads; every write is a short local transaction.
+#[derive(Debug, Clone)]
 pub struct Storage {
     path: PathBuf,
 }
 
 impl Storage {
+    /// Open the default history, relocating a v1 file with a backup first.
+    pub fn open_default() -> Result<Self, Error> {
+        if relocate_history(&legacy_db_path(), &default_db_path())?.is_some() {
+            tracing::info!(event = "history_relocated");
+        }
+        Self::open(&default_db_path())
+    }
+
     /// Open (creating parents) at `path`, migrate, and lock down permissions.
     pub fn open(path: &Path) -> Result<Self, Error> {
         if let Some(parent) = path.parent() {
@@ -421,6 +438,7 @@ impl Storage {
             meta: crate::results::model::ScanMeta {
                 scan_id: stored.scan_id,
                 version: env!("CARGO_PKG_VERSION").to_owned(),
+                schema_version: crate::results::model::current_schema_version(),
                 started_unix_secs: stored.started_unix_secs,
                 finished_unix_secs: finished.max(0) as u64,
                 truncated: truncated != 0,
@@ -669,6 +687,33 @@ fn update_detection_row(
     Ok(())
 }
 
+/// Move a v1 history file to the new default location, keeping a timestamped
+/// backup beside the original. Returns the backup path when a move happened.
+/// A failed move leaves the original untouched.
+pub fn relocate_history(old: &Path, new: &Path) -> Result<Option<PathBuf>, Error> {
+    if old == new || !old.exists() || new.exists() {
+        return Ok(None);
+    }
+    if let Some(parent) = new.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Storage(format!("cannot create {}: {e}", parent.display())))?;
+        }
+    }
+    let backup = old.with_extension(format!("db.bak.{}", unix_now()));
+    std::fs::copy(old, &backup)
+        .map_err(|e| Error::Storage(format!("cannot back up {}: {e}", old.display())))?;
+    std::fs::copy(old, new).map_err(|e| {
+        Error::Storage(format!(
+            "cannot migrate {} to {} (backup at {}): {e}",
+            old.display(),
+            new.display(),
+            backup.display()
+        ))
+    })?;
+    Ok(Some(backup))
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -900,6 +945,7 @@ mod tests {
             meta: ScanMeta {
                 scan_id: id.to_owned(),
                 version: "0.0.0".to_owned(),
+                schema_version: crate::results::model::current_schema_version(),
                 started_unix_secs: 1,
                 finished_unix_secs: 2,
                 truncated: false,
@@ -1035,6 +1081,41 @@ mod tests {
             .list_scans()
             .expect("list");
         assert!(stored.is_empty());
+    }
+
+    #[test]
+    fn relocate_moves_v1_file_with_backup() {
+        let dir = std::env::temp_dir().join(format!(
+            "sentinelscan-reloc-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let old = dir.join("history.db");
+        let new = dir.join("xdg/history.db");
+        std::fs::create_dir_all(dir.join("xdg")).expect("dirs");
+        std::fs::write(&old, b"v1-bytes").expect("v1 file");
+        let backup = super::relocate_history(&old, &new)
+            .expect("relocate")
+            .expect("moved");
+        assert_eq!(std::fs::read(&new).expect("new"), b"v1-bytes");
+        assert_eq!(std::fs::read(&backup).expect("backup"), b"v1-bytes");
+        assert!(super::relocate_history(&old, &new)
+            .expect("again")
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relocate_leaves_everything_alone_without_v1_file() {
+        let dir = std::env::temp_dir().join("sentinelscan-reloc-none");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            super::relocate_history(&dir.join("history.db"), &dir.join("x/history.db"))
+                .expect("relocate")
+                .is_none()
+        );
     }
 
     #[test]

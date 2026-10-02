@@ -139,6 +139,14 @@ pub struct Config {
 }
 
 impl Config {
+    /// Config file used when `--config` is absent: the XDG config dir, but
+    /// only when the file actually exists (otherwise built-in defaults apply,
+    /// exactly as in v1).
+    pub fn default_path() -> Option<std::path::PathBuf> {
+        let path = crate::paths::config_home()?.join("sentinelscan/config.toml");
+        path.exists().then_some(path)
+    }
+
     /// Load TOML from `path`, or fall back to conservative defaults when
     /// `path` is `None`. A missing file with an explicit path is an error.
     pub fn load(path: Option<&str>) -> Result<Self, Error> {

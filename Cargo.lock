@@ -861,6 +861,20 @@ version = "1.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "sentinelscan-core",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
+
+[[package]]
+name = "sentinelscan-core"
+version = "1.0.1"
+dependencies = [
+ "anyhow",
  "criterion",
  "ipnet",
  "proptest",
@@ -871,8 +885,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
- "ulid",
 ]
 
 [[package]]

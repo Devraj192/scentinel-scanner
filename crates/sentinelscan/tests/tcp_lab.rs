@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use sentinelscan::results::model::{HostStatus, PortState, Scan};
+use sentinelscan_core::results::model::{HostStatus, PortState, Scan};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 

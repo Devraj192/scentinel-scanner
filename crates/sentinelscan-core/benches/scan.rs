@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use sentinelscan::config::Limits;
-use sentinelscan::safety::scope::{parse_targets, ScopeGuard};
-use sentinelscan::scanner::rate_limit::RateLimiter;
-use sentinelscan::scanner::scheduler::scan_ports;
+use sentinelscan_core::config::Limits;
+use sentinelscan_core::safety::scope::{parse_targets, ScopeGuard};
+use sentinelscan_core::scanner::rate_limit::RateLimiter;
+use sentinelscan_core::scanner::scheduler::scan_ports;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio::sync::Semaphore;
@@ -84,7 +84,7 @@ fn bench_discovery(criterion: &mut Criterion) {
             let semaphore = Arc::new(Semaphore::new(limits.max_concurrency));
             let rate = Arc::new(RateLimiter::new(limits.max_rate));
             let ips = vec!["127.0.0.1".parse().expect("ip"); 8];
-            let (hosts, _) = sentinelscan::discovery::host::discover_all(
+            let (hosts, _) = sentinelscan_core::discovery::host::discover_all(
                 &ips, &ports, &limits, &guard, semaphore, rate,
             )
             .await;
@@ -96,7 +96,7 @@ fn bench_discovery(criterion: &mut Criterion) {
 }
 
 fn bench_detection(criterion: &mut Criterion) {
-    let detectors = sentinelscan::detection::all();
+    let detectors = sentinelscan_core::detection::all();
     let banners: Vec<&[u8]> = vec![
         b"SSH-2.0-OpenSSH_9.3p1 Debian\r\n",
         b"220 (vsFTPd 3.0.3)\r\n",
