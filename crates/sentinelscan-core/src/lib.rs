@@ -35,6 +35,7 @@ pub mod results;
 pub mod safety;
 pub mod scanner;
 pub mod storage;
+pub mod system;
 
 pub use config::Config;
 pub use errors::Error;

@@ -9,16 +9,35 @@ pub async fn run<T>(timeout_ms: u64, future: impl std::future::Future<Output = T
         .ok()
 }
 
-/// Drain a `JoinSet`, collecting results. A second Ctrl-C (or first) aborts
-/// in-flight tasks and reports `cancelled` so the caller can return partial
-/// results instead of hanging.
+/// Resolve when the process should stop: Ctrl-C everywhere, plus SIGTERM on
+/// Unix so containers and service managers shut scans down cleanly.
+pub async fn interrupted() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+                return;
+            }
+            Err(_) => {}
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Drain a `JoinSet`, collecting results. An interrupt aborts in-flight tasks
+/// and reports `cancelled` so the caller can return partial results instead
+/// of hanging.
 pub async fn join_cancellable<T: Send + 'static>(set: &mut JoinSet<T>) -> (Vec<T>, usize, bool) {
     let mut items = Vec::new();
     let mut join_errors = 0usize;
     loop {
         tokio::select! {
             biased;
-            _ = tokio::signal::ctrl_c() => {
+            _ = interrupted() => {
                 set.abort_all();
                 return (items, join_errors, true);
             }

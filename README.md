@@ -91,6 +91,9 @@ sentinelscan config [--config FILE]
 - `history` — list stored scans with host and open-port counts.
 - `compare` — diff two scans: added, removed, and changed ports/services.
 - `config` — print the effective configuration as TOML.
+- `doctor` — check file-descriptor limits, privileges, DNS, directory
+  permissions, and install method. Prints pass/warn/fail with fixes and
+  changes nothing.
 
 Targets accept IPv4, IPv6, CIDR ranges, and multiple values
 (`scan 127.0.0.1 10.0.0.0/30 --ports 22,80-85,443`). Hostnames are rejected
@@ -206,9 +209,12 @@ scripts should read JSON or CSV.
 
 ## History, compare, resume
 
-Every `scan` (including `ports` and `services` runs) persists to SQLite at
-`.sentinelscan/history.db` in the working directory; `--db` overrides the
-path. On Unix the directory is created `0o700` and the file `0o600`; on
+Every `scan` (including `ports` and `services` runs) persists to SQLite in
+the XDG data directory (`~/.local/share/sentinelscan/` on Linux,
+independent fallback on other platforms, `.sentinelscan/history.db` in the
+working directory when nothing else resolves); `--db` overrides the path.
+A v1 file at the old location relocates automatically with a timestamped
+backup. On Unix the directory is created `0o700` and the file `0o600`; on
 Windows the file inherits your user ACLs.
 
 - `history` lists scan id, status, targets, host count, open-port count.
@@ -247,8 +253,12 @@ service_detection = false
 service_detection = true
 ```
 
-`--concurrency` and `--rate` override the file. `sentinelscan config` prints
-the effective configuration, including profile tables.
+`--concurrency` and `--rate` override the file. On Unix the effective
+concurrency is additionally clamped to the file-descriptor limit (with a
+plain-language warning) so a scan never dies with "too many open files".
+`sentinelscan config` prints the effective configuration, including profile
+tables. A `sentinelscan/config.toml` in the XDG config directory is picked up
+automatically when `--config` is absent.
 
 ## Output formats
 
@@ -268,14 +278,14 @@ and all logs go to stderr. Structured logs (`scan_started`,
 The binary is a thin CLI over a reusable library:
 
 ```rust
-use sentinelscan::{Config, Storage};
+use sentinelscan_core::{Config, Storage};
 
 let config = Config::load(None)?; // conservative defaults, always valid
-let storage = Storage::open(std::path::Path::new(".sentinelscan/history.db"))?;
+let storage = Storage::open_default()?; // XDG history, v1 relocated as needed
 for scan in storage.list_scans()? {
     println!("{} {} ({} open)", scan.scan_id, scan.status, scan.open_port_count);
 }
-# Ok::<(), sentinelscan::Error>(())
+# Ok::<(), sentinelscan_core::Error>(())
 ```
 
 ## Benchmarks

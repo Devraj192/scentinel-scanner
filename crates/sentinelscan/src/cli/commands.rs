@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context};
 use tokio::sync::{mpsc, Semaphore};
 
 use super::args::{Command, HistoryArgs, ScanArgs, TargetArg};
+use crate::doctor::{run as run_doctor, Status};
 use sentinelscan_core::config::profiles::Profile;
 use sentinelscan_core::config::{Config, Limits};
 use sentinelscan_core::discovery::host::discover_all;
@@ -155,9 +156,14 @@ fn prepare(request: &PrepareRequest) -> anyhow::Result<Option<PreparedScan>> {
     tracing::info!(scan_id = %scan_id, event = "scan_started");
 
     validate_output_format(&request.output).map_err(|e| anyhow!("{e}"))?;
-    let mut config =
-        Config::load(config_source(&request.config_path).as_deref()).map_err(|e| anyhow!("{e}"))?;
-    apply_overrides(&mut config.limits, request.concurrency, request.rate)?;
+    let (config, fd_warning) = load_limits(
+        config_source(&request.config_path),
+        request.concurrency,
+        request.rate,
+    )?;
+    if let Some(warning) = fd_warning {
+        eprintln!("Warning: {warning}");
+    }
     let settings = effective_settings(
         request.profile,
         &config,
@@ -221,6 +227,21 @@ fn prepare(request: &PrepareRequest) -> anyhow::Result<Option<PreparedScan>> {
         os_enabled,
         storage,
     }))
+}
+
+/// Load config, apply CLI overrides, then clamp concurrency to the fd limit.
+/// Returns the config plus a plain-language warning when clamping kicked in.
+fn load_limits(
+    config_path: Option<String>,
+    concurrency: Option<usize>,
+    rate: Option<u64>,
+) -> anyhow::Result<(Config, Option<String>)> {
+    let mut config = Config::load(config_path.as_deref()).map_err(|e| anyhow!("{e}"))?;
+    apply_overrides(&mut config.limits, concurrency, rate)?;
+    let (capped, warning) =
+        sentinelscan_core::system::apply_fd_limits(config.limits.max_concurrency);
+    config.limits.max_concurrency = capped;
+    Ok((config, warning))
 }
 
 fn apply_overrides(
@@ -376,9 +397,11 @@ async fn run_resume(args: &ScanArgs, resume_id: &str) -> anyhow::Result<()> {
             stored.status
         ));
     }
-    let mut config =
-        Config::load(config_source(&args.config).as_deref()).map_err(|e| anyhow!("{e}"))?;
-    apply_overrides(&mut config.limits, args.concurrency, args.rate)?;
+    let (config, fd_warning) =
+        load_limits(config_source(&args.config), args.concurrency, args.rate)?;
+    if let Some(warning) = fd_warning {
+        eprintln!("Warning: {warning}");
+    }
     let settings = effective_settings(
         args.profile,
         &config,
@@ -556,6 +579,26 @@ pub async fn run(command: &Command) -> anyhow::Result<()> {
         Command::Ports(arg) => run_target_command(arg, TargetMode::Ports).await,
         Command::Services(arg) => run_target_command(arg, TargetMode::Services).await,
         Command::History(args) => run_history(args).await,
+        Command::Doctor(args) => {
+            validate_machine_output(&args.output).map_err(|e| anyhow!("{e}"))?;
+            let report = run_doctor().await;
+            if args.output == "json" {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_owned())
+                );
+            } else {
+                print!("{}", report.terminal());
+            }
+            if report
+                .checks
+                .iter()
+                .any(|check| check.status == Status::Fail)
+            {
+                return Err(anyhow!("doctor found failing checks"));
+            }
+            Ok(())
+        }
         Command::Compare(args) => {
             run_compare(&args.scan_a, &args.scan_b, &args.db, &args.output).await
         }

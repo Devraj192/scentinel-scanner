@@ -349,6 +349,41 @@ mod tests {
     }
 
     #[test]
+    fn output_views_emit_no_ansi_escapes() {
+        // The scanner never colorizes: NO_COLOR, dumb terminals, and pipes
+        // all see the same plain text.
+        let mut scan = Scan::start("01TEST".to_owned(), vec!["127.0.0.1".to_owned()]);
+        scan.hosts.push(HostResult {
+            address: "127.0.0.1".to_owned(),
+            status: HostStatus::Up,
+            latency_ms: 1,
+            ports: vec![PortResult {
+                port: 80,
+                protocol: "tcp".to_owned(),
+                state: PortState::Open,
+                reason: "handshake".to_owned(),
+                latency_ms: 1,
+                service: Some("http".to_owned()),
+                version: Some("TestLab/1.0".to_owned()),
+                confidence: Some(0.9),
+                evidence: Vec::new(),
+                banner: None,
+            }],
+            os: Some(crate::os::fingerprint::OsGuess::unknown()),
+        });
+        for view in [
+            terminal_table(&scan),
+            service_table(&scan),
+            host_table(&scan.hosts),
+            os_lines(&scan),
+            to_csv(&scan),
+            to_json(&scan),
+        ] {
+            assert!(!view.contains('\u{1b}'), "ANSI escape in output");
+        }
+    }
+
+    #[test]
     fn terminal_table_lists_down_hosts() {
         let mut scan = Scan::start("01TEST".to_owned(), vec![]);
         scan.hosts.push(HostResult {

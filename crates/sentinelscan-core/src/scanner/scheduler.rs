@@ -45,7 +45,7 @@ pub async fn scan_ports(
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let mut set = JoinSet::new();
-    let stop = tokio::signal::ctrl_c();
+    let stop = timeout::interrupted();
     tokio::pin!(stop);
     let mut spawn_cancelled = false;
     'spawn: for &ip in ips {

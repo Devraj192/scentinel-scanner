@@ -7,7 +7,11 @@ const AUTH_WARNING: &str =
 
 /// Fast, safety-first network scanner for authorized networks.
 #[derive(Debug, Parser)]
-#[command(name = "sentinelscan", version, about = AUTH_WARNING)]
+#[command(
+    name = "sentinelscan",
+    version = env!("SENTINELSCAN_BUILD"),
+    about = AUTH_WARNING
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -27,6 +31,8 @@ pub enum Command {
     History(HistoryArgs),
     /// Compare two scans.
     Compare(CompareArgs),
+    /// Check the environment: limits, privileges, DNS, directories, install.
+    Doctor(DoctorArgs),
     /// Show effective configuration.
     Config(ConfigArgs),
 }
@@ -106,12 +112,18 @@ pub struct CompareArgs {
     #[arg(long, default_value = "terminal")]
     pub output: String,
 }
-
 #[derive(Debug, Clone, Parser)]
 pub struct HistoryArgs {
     /// Path to SQLite history database.
     #[arg(long)]
     pub db: Option<String>,
+    /// Output format (terminal or json).
+    #[arg(long, default_value = "terminal")]
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct DoctorArgs {
     /// Output format (terminal or json).
     #[arg(long, default_value = "terminal")]
     pub output: String,

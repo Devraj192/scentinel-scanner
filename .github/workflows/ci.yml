@@ -19,3 +19,57 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo build --workspace
+
+  musl:
+    # Static binaries for every distro: no system libraries required.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release -p sentinelscan --target x86_64-unknown-linux-musl
+      - run: ldd target/x86_64-unknown-linux-musl/release/sentinelscan 2>&1 | grep -q "not a dynamic executable"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sentinelscan-x86_64-musl
+          path: target/x86_64-unknown-linux-musl/release/sentinelscan
+
+  musl-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cross --locked
+      - run: cross build --release -p sentinelscan --target aarch64-unknown-linux-musl
+
+  distro-smoke:
+    # The static binary plus a fixture server, on each supported distro.
+    needs: [musl]
+    strategy:
+      matrix:
+        include:
+          - image: ubuntu:24.04
+            install: apt-get update && apt-get install -y python3
+          - image: debian:12
+            install: apt-get update && apt-get install -y python3
+          - image: fedora:41
+            install: dnf install -y python3
+          - image: archlinux:base
+            install: pacman -Sy --noconfirm python
+          - image: alpine:3.21
+            install: apk add --no-cache python3
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sentinelscan-x86_64-musl
+      - run: chmod +x sentinelscan
+      - run: sh -c "${{ matrix.install }}"
+      - run: python3 -m http.server 8000 --bind 127.0.0.1 &
+      - run: sleep 2 && ./sentinelscan scan 127.0.0.1 --ports 8000 --profile quick --yes --skip-host-discovery | grep -q open
+      - run: ./sentinelscan doctor
+      - run: ./sentinelscan --version

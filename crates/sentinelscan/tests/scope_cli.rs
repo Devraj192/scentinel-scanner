@@ -64,6 +64,18 @@ fn scan_rejects_malformed_target() {
 }
 
 #[test]
+fn doctor_reports_without_changing_anything() {
+    let output = Command::new(binary())
+        .args(["doctor"])
+        .output()
+        .expect("run binary");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("CHECK"), "{stdout}");
+    assert!(stdout.contains("dns"), "{stdout}");
+}
+
+#[test]
 fn scan_enforces_max_ports() {
     let output = Command::new(binary())
         .args(["scan", "127.0.0.1", "--ports", "1-1025", "--yes"])
