@@ -39,7 +39,7 @@ pkg-fmt = "tgz"
 [package.metadata.deb]
 maintainer = "Devraj Pal <Devraj192@users.noreply.github.com>"
 copyright = "2026, Devraj Pal"
-license-file = ["../../../LICENSE"]
+license-file = ["LICENSE"]
 section = "net"
 priority = "optional"
 assets = [
