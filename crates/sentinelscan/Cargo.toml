@@ -3,7 +3,7 @@ name = "sentinelscan"
 version = "2.0.0"
 edition = "2021"
 description = "Authorized-only network discovery and TCP port scanner"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 repository = "https://github.com/Devraj192/sentinel-scanner"
 readme = "../../README.md"
 keywords = ["network", "scanner", "security", "tcp", "cli"]
@@ -39,7 +39,7 @@ pkg-fmt = "tgz"
 [package.metadata.deb]
 maintainer = "Devraj Pal <Devraj192@users.noreply.github.com>"
 copyright = "2026, Devraj Pal"
-license-file = ["../../../LICENSE-MIT", "../../../LICENSE-APACHE"]
+license-file = ["../../../LICENSE"]
 section = "net"
 priority = "optional"
 assets = [

@@ -31,5 +31,4 @@ version-or-unknown, confidence, and evidence. New UI code goes in
 
 ## Licensing
 
-Contributions are accepted under MIT OR Apache-2.0, matching `LICENSE-MIT`
-and `LICENSE-APACHE`.
+Contributions are accepted under Apache-2.0, matching `LICENSE`.

@@ -1,7 +1,7 @@
 # SentinelScan
 
 [![ci](https://github.com/Devraj192/sentinel-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/Devraj192/sentinel-scanner/actions/workflows/ci.yml)
-[![license: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 A command-line TCP port scanner for networks you are allowed to test. It
 discovers live hosts, classifies port states honestly, identifies services
@@ -387,4 +387,4 @@ every push and pull request.
 
 ## License
 
-MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+Apache-2.0 — see [LICENSE](LICENSE).

@@ -33,8 +33,8 @@ remains with the same meaning. Payloads without the field still parse.
 
 ## License
 
-`MIT` became `MIT OR Apache-2.0` (see `LICENSE-MIT`, `LICENSE-APACHE`).
-Use under either; no code changes required.
+`MIT` became `Apache-2.0` (see `LICENSE`). Use under those terms; no code
+changes required.
 
 ## Defaults
 

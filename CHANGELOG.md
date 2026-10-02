@@ -6,7 +6,7 @@ Workspace split (`sentinelscan-core` + `sentinelscan`), typed scan event
 stream, XDG paths with v1 backup-migration, Unix fd clamp, SIGTERM handling,
 `doctor`, plain-language CLI (wizard, `explain`/`init`/`completions`/`man`),
 ratatui TUI, musl static builds, `.deb`/`.rpm`, install script, container
-image, crates.io publishing, license MIT OR Apache-2.0. See MIGRATING.md.
+image, crates.io publishing, Apache-2.0 license. See MIGRATING.md.
 
 ratatui terminal UI sharing the engine event stream: home, guided new scan,
 live progress with pause/cancel, results with filter/sort/search, detail with
