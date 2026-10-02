@@ -87,7 +87,7 @@ jobs:
           name: dist-${{ matrix.target }}
           path: |
             sentinelscan-*.tgz
-            SHA256SUMS
+            SHA256SUMS-*
 
   packages:
     # .deb and .rpm for x86_64 (other arches ship tarballs).
@@ -132,7 +132,6 @@ jobs:
           name: packages
       - run: |
           find . -name 'SHA256SUMS-*' -exec cat {} + > SHA256SUMS
-          find . -name 'sentinelscan-*.tgz' -exec mv {} . \;
           sha256sum -c SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
