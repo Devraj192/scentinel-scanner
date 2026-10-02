@@ -115,7 +115,9 @@ jobs:
             target/x86_64-unknown-linux-musl/generate-rpm/*.rpm
 
   release:
-    needs: [publish, musl, packages]
+    # Ships even if the registry publish is still waiting on its token:
+    # artifacts come from this repo, not from crates.io.
+    needs: [musl, packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -128,6 +130,7 @@ jobs:
       - run: cat SHA256SUMS-* > SHA256SUMS; sha256sum -c SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           files: |
             sentinelscan-*.tgz
             SHA256SUMS
@@ -149,7 +152,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist-${{ matrix.target }}
-      - run: tar -xzf sentinelscan-*.tgz sentinelscan && mv sentinelscan sentinelscan-${{ matrix.arch }}
+      - run: tar -xzf sentinelscan-*.tgz sentinelscan && mv sentinelscan packaging/sentinelscan-${{ matrix.arch }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -159,8 +162,6 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: packaging
-          file: packaging/Dockerfile
-          platforms: linux/${{ matrix.arch }}
           push: true
           tags: ghcr.io/devraj192/sentinel-scanner:${{ github.ref_name }}-linux-${{ matrix.arch }}
           build-args: BINARY=sentinelscan-${{ matrix.arch }}
@@ -180,9 +181,44 @@ jobs:
           ghcr.io/devraj192/sentinel-scanner:${{ github.ref_name }}-linux-amd64
           ghcr.io/devraj192/sentinel-scanner:${{ github.ref_name }}-linux-arm64
 
-  install-test:
-    # Every documented install channel, each in a clean container.
-    needs: [release]
+  install-registry:
+    # Needs the crates published first; fails cleanly until the registry
+    # token exists, without blocking artifact channels.
+    needs: [publish]
+    strategy:
+      matrix:
+        include:
+          - image: archlinux:base
+            channel: binstall
+          - image: alpine:3.21
+            channel: cargo
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: binstall channel
+        if: matrix.channel == 'binstall'
+        run: |
+          TAG="${{ github.ref_name }}"; VER="${TAG#v}"
+          pacman -Sy --noconfirm curl python rustup
+          rustup toolchain install stable
+          rustup default stable
+          curl -LsSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y sentinelscan@${VER}
+          sentinelscan --version
+      - name: cargo channel
+        if: matrix.channel == 'cargo'
+        run: |
+          TAG="${{ github.ref_name }}"; VER="${TAG#v}"
+          apk add --no-cache curl python3 rustup musl-dev gcc
+          rustup-init -y --default-toolchain stable
+          source "$HOME/.cargo/env"
+          cargo install sentinelscan --version "${VER}"
+          sentinelscan --version
+
+  install-artifacts:
+    # Everything built in this repo: no registry needed.
+    needs: [release, container-manifest]
     strategy:
       matrix:
         include:
@@ -192,10 +228,6 @@ jobs:
             channel: deb
           - image: fedora:41
             channel: rpm
-          - image: archlinux:base
-            channel: binstall
-          - image: alpine:3.21
-            channel: cargo
     runs-on: ubuntu-latest
     container:
       image: ${{ matrix.image }}
@@ -238,22 +270,11 @@ jobs:
           sentinelscan --version
           test -f /usr/share/man/man1/sentinelscan.1
           dnf remove -y sentinelscan
-      - name: binstall channel
-        if: matrix.channel == 'binstall'
-        run: |
-          TAG="${{ github.ref_name }}"; VER="${TAG#v}"
-          pacman -Sy --noconfirm curl python rustup
-          rustup toolchain install stable
-          rustup default stable
-          curl -LsSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-          cargo binstall -y sentinelscan@${VER}
-          sentinelscan --version
-      - name: cargo channel
-        if: matrix.channel == 'cargo'
-        run: |
-          TAG="${{ github.ref_name }}"; VER="${TAG#v}"
-          apk add --no-cache curl python3 rustup musl-dev gcc
-          rustup-init -y --default-toolchain stable
-          source "$HOME/.cargo/env"
-          cargo install sentinelscan --version "${VER}"
-          sentinelscan --version
+
+  docker:
+    # The published image runs and reports itself.
+    needs: [container-manifest]
+    runs-on: ubuntu-latest
+    steps:
+      - run: docker run --rm ghcr.io/devraj192/sentinel-scanner:${{ github.ref_name }} --version
+      - run: docker run --rm ghcr.io/devraj192/sentinel-scanner:${{ github.ref_name }} doctor
