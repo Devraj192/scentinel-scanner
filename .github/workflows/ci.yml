@@ -26,7 +26,9 @@ jobs:
       - run: cargo audit
       - run: cargo deny check
       - run: cargo publish --dry-run -p sentinelscan-core
-      - run: cargo publish --dry-run -p sentinelscan
+      # No dry run for the binary here: it resolves sentinelscan-core from
+      # the registry, so it only packages after the core publish lands.
+      # The release workflow publishes core first, then the binary.
 
   musl:
     # Static binaries for every distro: no system libraries required.

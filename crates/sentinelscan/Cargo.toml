@@ -43,7 +43,7 @@ license-file = ["../../../LICENSE"]
 section = "net"
 priority = "optional"
 assets = [
-    ["../../target/x86_64-unknown-linux-musl/release/sentinelscan", "usr/bin/", "755"],
+    ["target/release/sentinelscan", "usr/bin/", "755"],
     ["../../packaging/completions/sentinelscan.bash", "usr/share/bash-completion/completions/sentinelscan", "644"],
     ["../../packaging/completions/sentinelscan.zsh", "usr/share/zsh/vendor-completions/_sentinelscan", "644"],
     ["../../packaging/completions/sentinelscan.fish", "usr/share/fish/vendor_completions.d/sentinelscan.fish", "644"],
