@@ -14,15 +14,14 @@ pub async fn run<T>(timeout_ms: u64, future: impl std::future::Future<Output = T
 pub async fn interrupted() {
     #[cfg(unix)]
     {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut terminate) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = terminate.recv() => {}
-                }
-                return;
+        if let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
             }
-            Err(_) => {}
+            return;
         }
     }
     let _ = tokio::signal::ctrl_c().await;
