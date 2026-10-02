@@ -94,12 +94,12 @@ fn check_fds() -> Check {
                 Some("run: ulimit -n 4096 (or lower --concurrency)".to_owned()),
             )
         };
-        return Check {
+        Check {
             name: "file descriptors".to_owned(),
             status,
             detail,
             fix,
-        };
+        }
     }
     #[cfg(not(unix))]
     {
