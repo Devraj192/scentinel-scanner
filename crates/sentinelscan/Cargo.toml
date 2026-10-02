@@ -22,6 +22,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid = "1.2"
 clap_complete = "4.6.11"
 clap_mangen = "0.3.3"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.10"

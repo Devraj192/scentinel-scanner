@@ -14,7 +14,7 @@ const AUTH_WARNING: &str =
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -57,6 +57,11 @@ pub enum Command {
     /// Examples:
     ///   sentinelscan doctor
     Doctor(DoctorArgs),
+    /// Open the full-screen terminal interface.
+    ///
+    /// Examples:
+    ///   sentinelscan tui
+    Tui,
     /// Explain a port state or confidence word in plain language.
     ///
     /// Examples:

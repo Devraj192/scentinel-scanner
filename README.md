@@ -84,8 +84,15 @@ sentinelscan explain <open|closed|filtered|unknown|confidence>
 sentinelscan init [--force]
 sentinelscan completions <bash|zsh|fish>
 sentinelscan man
+sentinelscan tui
 sentinelscan config [--config FILE]
 ```
+
+Run `sentinelscan` with no arguments to open the full-screen interface on a
+terminal (help text otherwise). The TUI shares the CLI's engine and event
+stream: same scope confirmation, same limits, identical results. Keys:
+`↑/↓` or `j/k` move, `Enter` opens, `Esc` goes back, `/` filters, `s` sorts,
+`p` pauses a running scan, `c` cancels, `e` exports, `?` help, `q` quits.
 
 First run asks for a one-time authorized-use acknowledgement (scripts use
 `--yes`); `scan` with no target starts a guided setup on a terminal, while
@@ -108,6 +115,10 @@ scripts must always pass explicit flags.
 - `init` — write a commented default config to the XDG config directory.
 - `completions` — shell completions for bash, zsh, fish.
 - `man` — the man page in roff format (`sentinelscan man | man -l -).
+- `tui` — full-screen interface: home, guided new scan, live progress,
+  sortable/filterable results, detail with explanations and evidence,
+  history with open/delete/export, two-scan compare, help. Same engine and
+  event stream as the CLI; pausing (`p`) halts new probes until resumed.
 
 Targets accept IPv4, IPv6, CIDR ranges, and multiple values
 (`scan 127.0.0.1 10.0.0.0/30 --ports 22,80-85,443`). Hostnames are rejected

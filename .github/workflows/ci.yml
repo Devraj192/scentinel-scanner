@@ -17,6 +17,9 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: no sockets in UI code
+        shell: bash
+        run: "! grep -rEn 'TcpStream|UdpSocket|lookup_host|SocketAddr|TcpListener' crates/sentinelscan/src/tui/ crates/sentinelscan/src/hints.rs || exit 1"
       - run: cargo test --workspace
       - run: cargo build --workspace
 

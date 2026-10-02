@@ -54,7 +54,7 @@ fn confirm_scope(summary: &str, yes: bool, use_stderr: bool) -> anyhow::Result<b
 
 /// Open history: explicit `--db` as-is, otherwise the XDG default (which
 /// relocates a v1 file with a backup on first run).
-fn open_storage(db: &Option<String>) -> anyhow::Result<Storage> {
+pub(crate) fn open_storage(db: &Option<String>) -> anyhow::Result<Storage> {
     match db {
         Some(path) => Storage::open(Path::new(path)),
         None => Storage::open_default(),
@@ -64,7 +64,7 @@ fn open_storage(db: &Option<String>) -> anyhow::Result<Storage> {
 
 /// Config source: explicit `--config`, else the XDG file when it exists,
 /// else built-in defaults.
-fn config_source(explicit: &Option<String>) -> Option<String> {
+pub(crate) fn config_source(explicit: &Option<String>) -> Option<String> {
     explicit
         .clone()
         .or_else(|| Config::default_path().map(|path| path.to_string_lossy().into_owned()))
@@ -88,7 +88,7 @@ fn validate_machine_output(output: &str) -> Result<(), Error> {
     }
 }
 
-struct PreparedScan {
+pub(crate) struct PreparedScan {
     scan_id: String,
     config: Config,
     ports: Vec<u16>,
@@ -101,7 +101,7 @@ struct PreparedScan {
 }
 
 /// Inputs for scope preparation; grouped so the parameter list stays small.
-struct PrepareRequest {
+pub(crate) struct PrepareRequest {
     raw_targets: Vec<String>,
     allow_hostnames: bool,
     port_spec: Option<String>,
@@ -279,6 +279,7 @@ impl PreparedScan {
             detect: self.detect,
             os_enabled: self.os_enabled,
             storage: self.storage.clone(),
+            pause: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -343,7 +344,7 @@ fn emit(scan: &Scan, output: &str, saved_to: Option<&str>) {
 
 /// Persist a cleanly finished scan. Interrupted scans stay `running` so
 /// `--resume` can pick them up.
-fn maybe_finish(storage: &Storage, scan: &Scan) -> anyhow::Result<()> {
+pub(crate) fn maybe_finish(storage: &Storage, scan: &Scan) -> anyhow::Result<()> {
     if scan.meta.truncated {
         eprintln!(
             "Scan {} stopped early; resume it with: sentinelscan scan --resume {} --yes",
@@ -726,6 +727,7 @@ pub async fn run(command: &Command) -> anyhow::Result<()> {
         Command::Explain(args) => run_explain(args),
         Command::Init(args) => run_init(args),
         Command::Completions(args) => run_completions(args),
+        Command::Tui => crate::tui::launch().await,
         Command::Man => run_man(),
     }
 }

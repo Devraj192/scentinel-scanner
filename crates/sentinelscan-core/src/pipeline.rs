@@ -32,6 +32,9 @@ pub struct ScanPlan {
     pub detect: bool,
     pub os_enabled: bool,
     pub storage: Storage,
+    /// Shared pause flag (driven by the TUI `p` key). The CLI leaves it
+    /// unset, so scans run uninterrupted.
+    pub pause: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Best-effort send: a gone receiver means nobody is listening, and the scan
@@ -119,7 +122,12 @@ async fn execute_inner(
         .collect();
 
     let semaphore = Arc::new(Semaphore::new(plan.limits.max_concurrency.max(1)));
-    let rate = Arc::new(RateLimiter::new(plan.limits.max_rate.max(1)));
+    // The limiter shares the plan's pause flag, so toggling it pauses and
+    // resumes every probe, banner grab, and detector in the run.
+    let rate = Arc::new(RateLimiter::with_pause(
+        plan.limits.max_rate.max(1),
+        Arc::clone(&plan.pause),
+    ));
 
     let mut hosts: Vec<HostResult> = Vec::new();
     let mut scannable: Vec<IpAddr> = Vec::new();

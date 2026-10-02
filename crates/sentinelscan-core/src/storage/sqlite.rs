@@ -301,6 +301,22 @@ impl Storage {
         Ok(())
     }
 
+    /// Delete a scan and all its rows. Used by the TUI history screen.
+    pub fn delete_scan(&self, scan_id: &str) -> Result<(), Error> {
+        let conn = self.connect()?;
+        conn.execute("DELETE FROM ports WHERE scan_id = ?1", [scan_id])
+            .map_err(|e| Error::Storage(format!("delete_scan: {e}")))?;
+        conn.execute("DELETE FROM hosts WHERE scan_id = ?1", [scan_id])
+            .map_err(|e| Error::Storage(format!("delete_scan: {e}")))?;
+        let removed = conn
+            .execute("DELETE FROM scans WHERE scan_id = ?1", [scan_id])
+            .map_err(|e| Error::Storage(format!("delete_scan: {e}")))?;
+        if removed == 0 {
+            return Err(Error::Storage(format!("unknown scan id '{scan_id}'")));
+        }
+        Ok(())
+    }
+
     /// Load a scan row with its resume scope.
     pub fn load_scan(&self, scan_id: &str) -> Result<StoredScan, Error> {
         let conn = self.connect()?;
