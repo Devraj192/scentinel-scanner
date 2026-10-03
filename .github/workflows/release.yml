@@ -136,7 +136,6 @@ jobs:
           name: packages
       - run: |
           find . -name 'SHA256SUMS-*' -exec cat {} + > SHA256SUMS
-          find . -mindepth 2 \( -name 'sentinelscan-*.tgz' -o -name '*.deb' -o -name '*.rpm' \) -exec mv -t . {} +
           sha256sum -c SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
