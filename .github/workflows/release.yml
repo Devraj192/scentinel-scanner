@@ -111,7 +111,7 @@ jobs:
       - run: ln -s crates/sentinelscan sentinelscan
       - run: cargo generate-rpm --target x86_64-unknown-linux-musl -p sentinelscan
       - run: |
-          find target \( -name '*.deb' -o -name '*.rpm' \) -execdir sha256sum {} + | sed 's|\./||' | sort > SHA256SUMS-packages
+          find target \( -name '*.deb' -o -name '*.rpm' \) -execdir sha256sum {} + | sed 's|\./||' | sort -u > SHA256SUMS-packages
           cat SHA256SUMS-packages
       - uses: actions/upload-artifact@v4
         with:
@@ -265,7 +265,7 @@ jobs:
         run: |
           apt-get update && apt-get install -y curl python3
           curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS" -o SHA256SUMS
-          DEB="$(grep '\.deb$' SHA256SUMS | awk '{print $2}')"
+          DEB="$(grep '\.deb$' SHA256SUMS | awk '{print $2}' | head -n1)"
           curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$DEB" -o scan.deb
           dpkg -i scan.deb
           sentinelscan --version
@@ -278,7 +278,7 @@ jobs:
         run: |
           dnf install -y curl python3 findutils
           curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS" -o SHA256SUMS
-          RPM="$(grep '\.rpm$' SHA256SUMS | awk '{print $2}')"
+          RPM="$(grep '\.rpm$' SHA256SUMS | awk '{print $2}' | head -n1)"
           curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$RPM" -o scan.rpm
           dnf install -y ./scan.rpm
           sentinelscan --version
