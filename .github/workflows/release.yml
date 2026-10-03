@@ -141,6 +141,7 @@ jobs:
             SHA256SUMS
             **/*.deb
             **/*.rpm
+            packaging/sentinelscan-installer.sh
 
   container:
     needs: [musl]
@@ -256,9 +257,10 @@ jobs:
       - name: deb channel
         if: matrix.channel == 'deb'
         run: |
-          TAG="${{ github.ref_name }}"; VER="${TAG#v}"
           apt-get update && apt-get install -y curl python3
-          curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sentinelscan_${VER}_amd64.deb" -o scan.deb
+          curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS" -o SHA256SUMS
+          DEB="$(grep '\.deb$' SHA256SUMS | awk '{print $2}')"
+          curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$DEB" -o scan.deb
           dpkg -i scan.deb
           sentinelscan --version
           test -f /usr/share/man/man1/sentinelscan.1
@@ -268,9 +270,10 @@ jobs:
       - name: rpm channel
         if: matrix.channel == 'rpm'
         run: |
-          TAG="${{ github.ref_name }}"; VER="${TAG#v}"
           dnf install -y curl python3 findutils
-          curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sentinelscan-${VER}-1.x86_64.rpm" -o scan.rpm
+          curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS" -o SHA256SUMS
+          RPM="$(grep '\.rpm$' SHA256SUMS | awk '{print $2}')"
+          curl -LsSf "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$RPM" -o scan.rpm
           dnf install -y ./scan.rpm
           sentinelscan --version
           test -f /usr/share/man/man1/sentinelscan.1
